@@ -1,0 +1,41 @@
+# Eä Symbiote Policy v0
+# Cryptographic immune system policy specification
+
+policy_version: "v0.1.0"
+policy_id: "0x8a4f...c92b"  # Blake3 hash of this policy
+
+# Policy: Heal CVE-2026-01 in specific muscle versions
+rule heal_cve_2026_01:
+    description: "Fix buffer overflow in neural network weight loading"
+    trigger:
+        muscle_id: "0xEAEAEA..."  # Specific vulnerable muscle
+        version_range: [40, 42]   # Vulnerable versions
+        condition: "referee_verify(muscle_id, version)"
+    action:
+        type: "heal_vulnerability"
+        patch: "patch_cve_2026_01"
+        target_version: "version + 1"
+
+# Policy: Quarantine parasite patterns  
+rule quarantine_parasite:
+    description: "Quarantine muscles with parasite signatures"
+    trigger:
+        muscle_pattern: ".*parasite.*"  # Name pattern matching
+        condition: "true"  # Always quarantine if pattern matches
+    action:
+        type: "quarantine"
+        reason: "Contains parasite signature"
+
+# Policy: Rate limit healing attempts
+rule rate_limit_healing:
+    description: "Prevent excessive healing attempts"
+    trigger:
+        condition: "healing_attempts(muscle_id) > 3"
+    action:
+        type: "quarantine" 
+        reason: "Excessive healing attempts - possible exploit"
+
+# Metadata
+author: "Eä Foundation"
+created: "2025-12-01"
+security_level: "high"
