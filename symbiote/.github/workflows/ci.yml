@@ -1,0 +1,54 @@
+name: Symbiote CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Run no-std tests
+      run: cargo test --no-default-features --verbose
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Security audit
+      uses: actions-rs/audit-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check unsafe code
+      run: |
+        ! cargo geiger --quiet | grep -q "UNSAFE"
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Generate coverage
+      run: |
+        cargo install cargo-tarpaulin
+        cargo tarpaulin --verbose --out Xml
+    - name: Upload to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: cobertura.xml
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run benchmarks
+      run: cargo bench --verbose
