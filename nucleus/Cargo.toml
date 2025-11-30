@@ -1,0 +1,33 @@
+[package]
+name = "muscle-nucleus"
+version = "0.1.0"
+description = "The first true biological kernel - 8KiB of pure life"
+authors = ["Eä Foundation"]
+edition = "2021"
+
+[features]
+default = ["std"]
+std = []
+no_std = []
+
+[dependencies]
+ea-ledger = { path = "../ledger" }
+ea-symbiote = { path = "../symbiote" }
+ea-referee = { path = "../referee" }
+
+[lib]
+name = "nucleus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nucleus"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
