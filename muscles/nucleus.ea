@@ -1,0 +1,21 @@
+// nucleus.ea — THE ONE TRUE KERNEL
+input lattice_stream<MuscleUpdate>
+input hardware_attestation<DeviceProof>
+input symbiote<SealedBlob>
+
+capability load_muscle(id)
+capability schedule(id, priority)
+capability emit_update(blob)
+
+rule on_boot:
+    verify hardware_attestation
+    verify lattice_root == 0xEA...genesis
+    load_muscle(symbiote_id) -> symbiote
+    schedule(symbiote, 255)
+
+rule on_lattice_update(update):
+    if symbiote.process(update) -> healing:
+        emit_update(healing.blob)
+
+rule on_timer_1hz:
+    emit heartbeat(self.id, self.version)
