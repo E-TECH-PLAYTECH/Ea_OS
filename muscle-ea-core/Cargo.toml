@@ -1,0 +1,28 @@
+[package]
+name = "muscle-ea-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Core biological substrate for Eä Muscle ecosystem - shared types, traits, and cryptographic primitives"
+authors = ["Eä Foundation"]
+repository = "https://github.com/ea-foundation/ea-os"
+keywords = ["biological-computing", "capability-security", "cryptography", "muscle-ea"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+rand_core = { version = "0.6", features = ["std"] }
+zeroize = { version = "1.8", features = ["derive"] }
+thiserror = { version = "1.0", default-features = false }
+serde = { version = "1.0", features = ["derive"], optional = true }
+blake3 = "1.5"
+aes-gcm = { version = "0.10", features = ["aes"] }
+
+[features]
+default = ["std"]
+std = ["thiserror/std", "rand_core/std"]
+no-std = ["thiserror?/no-std", "alloc"]
+alloc = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
