@@ -1,0 +1,38 @@
+[package]
+name = "referee"
+version = "5.0.0"
+edition = "2021"
+authors = ["Eä Team"]
+description = "Secure UEFI bootloader with v5.0 cryptographic muscle isolation"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "referee"
+path = "src/main.rs"
+
+[dependencies]
+uefi = { version = "0.24", features = ["alloc"] }
+uefi-services = "0.21"
+blake3 = "1.5"
+aes-gcm-siv = { version = "0.11", features = ["aes"] }
+subtle = "2.5"
+zeroize = "1.8"
+
+[dev-dependencies]
+proptest = "1.4"
+
+[package.metadata.uefi]
+output = "referee.efi"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+strip = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
