@@ -1,0 +1,27 @@
+[package]
+name = "muscle-ea-axonwasm"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "AxonWasmMuscle — streaming neural fiber for Eä biological compute substrate: multi-organelle parallel execution with synaptic fan-in/fan-out and sealed signal propagation"
+authors = ["Eä Foundation"]
+repository = "https://github.com/ea-foundation/ea-os"
+keywords = ["muscle-ea", "neural-compute", "streaming", "axon", "synaptic"]
+categories = ["cryptography", "concurrency", "no-std"]
+
+[dependencies]
+muscle-ea-core = { path = "../muscle-ea-core", version = "0.1" }
+muscle-ea-pathfinder = { path = "../muscle-ea-pathfinder", version = "0.1" }
+sha3 = "0.10"
+rand_core = "0.6"
+zeroize = { version = "1.8", features = ["derive"] }
+thiserror = "1.0"
+smallvec = "1.13"
+
+[features]
+default = ["std"]
+std = []
+no-std = ["alloc"]
+
+[dev-dependencies]
+hex-literal = "0.4"
