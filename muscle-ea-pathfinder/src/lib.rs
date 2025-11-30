@@ -26,7 +26,7 @@ use wasmtime::*;
 use zeroize::{Zeroize, Zeroizing};
 use rand_core::{RngCore, CryptoRng};
 use sha3::{Shake256, digest::{Update, ExtendableOutput, XofReader}};
-use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, generic_array::GenericArray}};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, generic_array::GenericArray, Payload}};
 use hmac::{Hmac, Mac};
 use smallvec::SmallVec;
 
@@ -156,12 +156,14 @@ impl<R: RngCore + CryptoRng> PathfinderCell<R> {
         }
         
         let key = self.successor_keys.remove(0);
-        let sealed_blob = seal_pathfinder_blob(&key, wasm, &mut self.rng)?;
+        let salt = MuscleSalt::random(&mut self.rng);
+        let sealed_blob = seal_pathfinder_blob(&key, &salt, wasm, &mut self.rng)?;
         
         let successor = MuscleSuccessor {
             blob: sealed_blob,
             metadata: SuccessorMetadata::new(3, "pathfinder".to_string())
-                .with_property("wasm_size".to_string(), wasm.len().to_string()),
+                .with_property("wasm_size".to_string(), wasm.len().to_string())
+                .with_property("organelle_type".to_string(), "wasm_execution".to_string()),
         };
         
         self.successors.push(successor.clone());
@@ -271,14 +273,36 @@ fn run_pathfinder_isolate<R: RngCore + CryptoRng>(
         Ok(())
     });
 
-    let seal_successor_func = Func::wrap(&mut store, |mut caller: Caller<'_, PathfinderCell<R>>, ptr: u32, len: u32, out_ptr: u32| -> Result<u32, Trap> {
+    let seal_successor_func = Func::wrap(&mut store, |mut caller: Caller<'_, PathfinderCell<R>>, ptr: u32, len: u32, out_ptr: u32, out_len_ptr: u32| -> Result<u32, Trap> {
         let memory = caller.get_export("memory").and_then(|e| e.into_memory()).ok_or_else(|| Trap::new("no memory"))?;
-        let mut wasm_data = vec![0u8; len as usize];
-        memory.read(&caller, ptr as usize, &mut wasm_data)?;
-        let successor = caller.data_mut().seal_successor(&wasm_data).map_err(|e| Trap::new(e.to_string()))?;
         
-        // For now, just return success - in full implementation would write successor
-        Ok(1)
+        // Read WASM bytes from guest memory
+        let mut wasm_data = vec![0u8; len as usize];
+        memory.read(&caller, ptr as usize, &mut wasm_data)
+            .map_err(|e| Trap::new(format!("memory read failed: {}", e)))?;
+        
+        // Create successor muscle
+        let successor = caller.data_mut().seal_successor(&wasm_data)
+            .map_err(|e| Trap::new(format!("seal failed: {}", e)))?;
+        
+        // Serialize successor to bytes for return to guest
+        let serialized = serialize_successor_for_guest(&successor)
+            .map_err(|e| Trap::new(format!("serialization failed: {}", e)))?;
+        
+        // Write serialized data back to guest memory
+        if serialized.len() > 4096 { // Reasonable limit for successor data
+            return Err(Trap::new("successor data too large"));
+        }
+        
+        memory.write(&mut caller, out_ptr as usize, &serialized)
+            .map_err(|e| Trap::new(format!("memory write failed: {}", e)))?;
+        
+        // Write length to guest memory
+        let len_bytes = (serialized.len() as u32).to_le_bytes();
+        memory.write(&mut caller, out_len_ptr as usize, &len_bytes)
+            .map_err(|e| Trap::new(format!("length write failed: {}", e)))?;
+        
+        Ok(0) // Success return code
     });
 
     let instance = Instance::new(&mut store, &module, &[
@@ -305,6 +329,39 @@ fn run_pathfinder_isolate<R: RngCore + CryptoRng>(
         output: cell.output.to_vec(),
         successors: cell.successors,
     })
+}
+
+/// Serialize successor data for passing back to WASM guest
+fn serialize_successor_for_guest(successor: &MuscleSuccessor) -> Result<Vec<u8>, MuscleError> {
+    use core::fmt::Write;
+    
+    let mut serialized = Vec::new();
+    
+    // Simple binary format: [version: u32][blob_size: u32][blob_data][metadata_size: u32][metadata...]
+    
+    // Version
+    serialized.extend_from_slice(&successor.blob.version().to_le_bytes());
+    
+    // Blob size and data
+    let blob_data = &successor.blob.payload;
+    serialized.extend_from_slice(&(blob_data.len() as u32).to_le_bytes());
+    serialized.extend_from_slice(blob_data);
+    
+    // Metadata: muscle_type + properties as simple string format
+    let mut metadata_str = String::new();
+    write!(&mut metadata_str, "type:{}", successor.metadata.muscle_type)
+        .map_err(|e| MuscleError::Custom(format!("metadata serialization failed: {}", e)))?;
+    
+    for (key, value) in &successor.metadata.properties {
+        write!(&mut metadata_str, ",{}:{}", key, value)
+            .map_err(|e| MuscleError::Custom(format!("property serialization failed: {}", e)))?;
+    }
+    
+    let metadata_bytes = metadata_str.into_bytes();
+    serialized.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+    serialized.extend_from_slice(&metadata_bytes);
+    
+    Ok(serialized)
 }
 
 // Cryptographic organelles — biological framing of crypto operations
@@ -339,7 +396,7 @@ fn decrypt_pathfinder_aes(key: &[u8; 32], nonce: &[u8; 12], ciphertext: &[u8]) -
     cipher.decrypt(nonce, ciphertext).ok()
 }
 
-fn seal_pathfinder_blob(key: &[u8; 32], payload: &[u8], rng: &mut impl RngCore) -> Result<SealedBlob, MuscleError> {
+fn seal_pathfinder_blob(key: &[u8; 32], salt: &MuscleSalt, payload: &[u8], rng: &mut impl RngCore) -> Result<SealedBlob, MuscleError> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| MuscleError::Crypto("invalid key".to_string()))?;
     
@@ -347,4 +404,87 @@ fn seal_pathfinder_blob(key: &[u8; 32], payload: &[u8], rng: &mut impl RngCore) 
     rng.fill_bytes(&mut nonce);
     
     let nonce_array = GenericArray::from_slice(&nonce);
-    let ciphertext = cipher.encrypt
+    let ciphertext = cipher.encrypt(nonce_array, payload)
+        .map_err(|_| MuscleError::Crypto("encryption failed".to_string()))?;
+
+    // Build the full sealed data with header
+    let mut sealed_data = Vec::with_capacity(core::mem::size_of::<PathfinderHeader>() + ciphertext.len());
+    
+    // Create header (MAC will be computed after)
+    let header = PathfinderHeader {
+        version: 3,
+        salt: *salt.as_bytes(),
+        nonce,
+        mac: [0u8; 16], // Placeholder - will be set below
+        ciphertext_len: ciphertext.len() as u64,
+    };
+    
+    // Write header
+    sealed_data.extend_from_slice(header.as_bytes());
+    sealed_data.extend_from_slice(&ciphertext);
+    
+    // Compute and set MAC
+    let mac = compute_pathfinder_hmac(key, salt, &sealed_data);
+    
+    // Update MAC in the sealed data
+    let mac_offset = core::mem::size_of_val(&header.version) 
+                   + core::mem::size_of_val(&header.salt)
+                   + core::mem::size_of_val(&header.nonce);
+    sealed_data[mac_offset..mac_offset + 16].copy_from_slice(&mac);
+    
+    Ok(SealedBlob::new(sealed_data, *salt, 3))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand_core::OsRng;
+
+    #[test]
+    fn test_pathfinder_muscle_creation() {
+        let muscle = PathfinderMuscle::<OsRng>::default();
+        assert!(core::mem::size_of_val(&muscle) > 0);
+    }
+
+    #[test]
+    fn test_pathfinder_cell_operations() {
+        let mut rng = OsRng;
+        let input = vec![1, 2, 3, 4, 5];
+        let keys = vec![[0u8; 32]];
+        let cell = PathfinderCell::new(input.clone(), keys, &mut rng);
+        
+        let read_data = cell.read_input(1, 3).unwrap();
+        assert_eq!(read_data, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_crypto_primitives() {
+        let key = [1u8; 32];
+        let salt = MuscleSalt::new([2u8; 16]);
+        let nonce = [3u8; 12];
+        
+        let derived = derive_pathfinder_key(&key, &salt, &nonce);
+        assert_eq!(derived.len(), 32);
+        
+        let data = b"test data";
+        let mac = compute_pathfinder_hmac(&key, &salt, data);
+        assert_eq!(mac.len(), 16);
+    }
+
+    #[test]
+    fn test_successor_serialization() {
+        let salt = MuscleSalt::new([0u8; 16]);
+        let blob = SealedBlob::new(vec![1, 2, 3], salt, 3);
+        let metadata = SuccessorMetadata::new(3, "test".to_string())
+            .with_property("key".to_string(), "value".to_string());
+        
+        let successor = MuscleSuccessor {
+            blob,
+            metadata,
+        };
+        
+        let serialized = serialize_successor_for_guest(&successor).unwrap();
+        assert!(!serialized.is_empty());
+        assert!(serialized.len() >= 16); // Minimum header size
+    }
+}
