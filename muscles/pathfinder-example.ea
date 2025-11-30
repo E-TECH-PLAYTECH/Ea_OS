@@ -1,0 +1,33 @@
+// pathfinder-example.ea — Example Pathfinder Muscle using WASM execution
+// Demonstrates biological integration of WASM computation as cellular organelle
+
+input computation_request<WasmInput>
+input lattice_stream<MuscleUpdate>
+
+capability emit_update(blob: SealedBlob)
+capability execute_wasm(module: WasmBlob) -> WasmResult
+
+const PATHFINDER_TYPE: &str = "wasm_computation"
+const MAX_COMPUTATION_FUEL: u64 = 1000000
+
+rule on_computation_request(request: WasmInput):
+    let wasm_module = request.extract_wasm_bytes()
+    let computation_result = execute_wasm(wasm_module)
+    
+    if computation_result.success -> output:
+        emit computation_output(self.id, computation_result.data)
+    else -> failure:
+        emit computation_failed(self.id, computation_result.error)
+
+rule on_lattice_update(update: MuscleUpdate):
+    if update.contains_wasm_improvement -> improvement:
+        let improved_module = update.extract_improved_wasm()
+        let successor = create_wasm_successor(improved_module)
+        emit_update(successor.blob)
+
+rule on_timer_1hz:
+    emit computation_heartbeat(self.id, self.version, "pathfinder_active")
+
+rule on_resource_exhaustion:
+    emit emergency_shutdown(self.id, "computation_fuel_exhausted")
+    // Biological response: cell apoptosis when resources exhausted
