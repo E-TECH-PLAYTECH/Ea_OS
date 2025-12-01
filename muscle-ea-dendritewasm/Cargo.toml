@@ -1,0 +1,27 @@
+[package]
+name = "muscle-ea-dendritewasm"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "DendriteWasmMuscle — dendritic integrator for Eä neural compute substrate: spatial + temporal summation with Hebbian plasticity and persistent synaptic weights"
+authors = ["Eä Foundation"]
+repository = "https://github.com/ea-foundation/ea-os"
+keywords = ["muscle-ea", "neural-compute", "dendrite", "hebbian", "plasticity"]
+categories = ["cryptography", "concurrency", "no-std"]
+
+[dependencies]
+muscle-ea-core = { path = "../muscle-ea-core", version = "0.1" }
+muscle-ea-axonwasm = { path = "../muscle-ea-axonwasm", version = "0.1" }
+sha3 = "0.10"
+rand_core = "0.6"
+zeroize = { version = "1.8", features = ["derive"] }
+thiserror = "1.0"
+hex = { version = "0.4", default-features = false }
+
+[features]
+default = ["std"]
+std = []
+no-std = ["alloc"]
+
+[dev-dependencies]
+hex-literal = "0.4"
