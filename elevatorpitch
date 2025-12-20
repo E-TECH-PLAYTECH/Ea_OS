@@ -1,0 +1,42 @@
+# E OS Elevator Pitch and Architecture
+
+## Elevator Pitch
+
+E OS is a radically minimal, cryptographic execution environment that runs neural network "muscles" with absolute security and verifiability. Each musclecompiled from Python/NumPyexecutes in total isolation within a hardened kernel, guarded by a zero-dynamic, spatially separated architecture.
+
+All system events and updates are immutably logged in an append-only, proof-based lattice ledger.
+
+Security is enforced and autonomously remediated by an in-kernel "immune system" (the Symbiote), providing automatic cryptographic audit, healing, and unstoppable global traceability.
+
+No network stack, no syscalls, and no possibility of lateral movementjust provable neural execution, cryptographically secured from boot to blob.
+
+---
+
+## E OS Architecture Diagram
+
+```
+            +----------------------+
+            |     UEFI Boot        |
+            +----------+-----------+
+                       |
+                       v
+                +--------------+
+            +-->|   Referee    |<-------+
+            |   +--------------+        |
+            |          |                |
+            |          v                |
+        +-------+   +----------------------+    +----------------------+
+        |Muscle |-->|   Nucleus Kernel     |<-->|    Symbiote Immune   |
+        |Slots  |   +----------------------+    |    System            |
+        |(NNs)  |          |                    +----------------------+
+        +-------+          |
+                       +----------------------+
+                       |  Lattice Ledger      |
+                       | (Append-Only, QR)    |
+                       +----------------------+
+```
+
+- Muscle Compiler produces cryptographically sealed NN blobs.
+- Referee (UEFI bootloader) loads/verifies and launches muscles into isolated slots under the Nucleus kernel.
+- Symbiote watches all execution, applies security patches, and records actions in the Lattice Ledger.
+- Lattice Ledger is a trustless, constant-size log that globally audits all system events.
