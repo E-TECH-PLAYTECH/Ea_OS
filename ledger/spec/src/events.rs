@@ -10,8 +10,8 @@
 //! payload tag, and round-trip between typed events and ledger envelopes.
 
 use crate::{
-    hash_body, Channel, Envelope, EnvelopeBody, EnvelopeHeader, Hash, PublicKey, SchemaVersion,
-    Timestamp,
+    hash_body, policy::PolicyAlert, policy::PolicyDecision, policy::PolicyDefinition, Channel,
+    Envelope, EnvelopeBody, EnvelopeHeader, Hash, PublicKey, SchemaVersion, Timestamp,
 };
 use blake3::Hasher;
 use serde::{de::Error as DeError, Deserialize, Serialize};
@@ -411,6 +411,26 @@ pub enum AgencyEvent {
     },
 }
 
+/// Policy distribution, alerts, and decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PolicyEvent {
+    /// Publish a new policy bundle version.
+    DefinitionPublished {
+        /// Declarative policy bundle.
+        definition: PolicyDefinition,
+    },
+    /// Decision emitted by the policy engine.
+    DecisionRecorded {
+        /// Decision payload with bindings and final effect.
+        decision: PolicyDecision,
+    },
+    /// Alert emitted during policy evaluation.
+    AlertRaised {
+        /// Alert details.
+        alert: PolicyAlert,
+    },
+}
+
 /// Events that flow through the ledger bus.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "data")]
@@ -425,6 +445,8 @@ pub enum EventKind {
     Privacy(PrivacyEvent),
     /// User companion/agency flows.
     Agency(AgencyEvent),
+    /// Policy definition distribution and enforcement traces.
+    Policy(PolicyEvent),
 }
 
 impl EventKind {
@@ -451,7 +473,10 @@ impl EventKind {
             | EventKind::Agency(AgencyEvent::TerminalResult { .. })
             | EventKind::Agency(AgencyEvent::ModelLoad { .. })
             | EventKind::Muscle(MuscleEvent::LifecycleUpdate(_))
-            | EventKind::Muscle(MuscleEvent::LifecycleError(_)) => EventIntent::Response,
+            | EventKind::Muscle(MuscleEvent::LifecycleError(_))
+            | EventKind::Policy(PolicyEvent::DecisionRecorded { .. }) => EventIntent::Response,
+            EventKind::Policy(PolicyEvent::DefinitionPublished { .. })
+            | EventKind::Policy(PolicyEvent::AlertRaised { .. }) => EventIntent::Notify,
         }
     }
 }

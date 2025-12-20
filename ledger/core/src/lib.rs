@@ -19,6 +19,8 @@ use ledger_spec::{
 pub mod brainstem;
 /// Lifecycle management and enforcement for muscles.
 pub mod lifecycle;
+/// Pluggable policy enforcement and decision emission.
+pub mod policy;
 
 /// Append-only log identifier.
 pub type LogId = String;

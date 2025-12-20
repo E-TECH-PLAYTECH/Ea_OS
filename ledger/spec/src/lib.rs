@@ -12,6 +12,8 @@ use thiserror::Error;
 
 /// Event and workflow schema layered on top of envelopes.
 pub mod events;
+/// Declarative policy model shared across ledger components.
+pub mod policy;
 
 /// Blake3 hash output (32 bytes).
 pub type Hash = [u8; 32];
