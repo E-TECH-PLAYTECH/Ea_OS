@@ -15,6 +15,9 @@ use ledger_spec::{
     EnvelopeHeader, Signature, ValidationError,
 };
 
+mod brainstem;
+pub use brainstem::*;
+
 /// Append-only log identifier.
 pub type LogId = String;
 
