@@ -3,7 +3,8 @@ members = [
     "ledger/spec",
     "ledger/core",
     "ledger/transport",
-    "ledger/ledgerd"
+    "ledger/ledgerd",
+    "ledger/arda"
 ]
 resolver = "2"
 
