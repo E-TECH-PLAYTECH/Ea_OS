@@ -202,6 +202,16 @@ pub enum ControlEvent {
         /// Optional human-readable summary.
         summary: Option<String>,
     },
+    /// Advertise transport capabilities and attestation handshakes.
+    TransportCapability {
+        /// Capability advertisement payload.
+        advertisement: TransportCapability,
+    },
+    /// Confirmed binding between domains and adapters.
+    TransportBinding {
+        /// Binding payload selected after negotiation.
+        binding: TransportBinding,
+    },
     /// Publish an attestation digest (build/runtime/policy bundle).
     AttestationNotice {
         /// Hash of the attestation payload stored off-ledger.
@@ -218,6 +228,98 @@ pub enum ControlEvent {
         /// Hash of the contract document for determinism.
         contract_hash: Hash,
     },
+}
+
+/// Domain for transport capability advertisements.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CapabilityDomain {
+    /// Ledger/brainstem nodes.
+    Ledger,
+    /// Arda companion runtimes.
+    Arda,
+    /// Muscle or execution runtimes (TEE/VM).
+    Muscle,
+}
+
+/// Adapter kinds that can be negotiated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data")]
+pub enum CapabilityAdapterKind {
+    /// QUIC or gRPC split between VM and app.
+    QuicGrpc {
+        /// Endpoint or authority string.
+        endpoint: String,
+        /// Optional ALPN.
+        #[serde(default)]
+        alpn: Option<String>,
+    },
+    /// Mailbox/ring buffer for enclave/chip.
+    Mailbox {
+        /// Mailbox identifier.
+        mailbox: String,
+        /// Max bytes per slot.
+        slot_bytes: usize,
+        /// Slot count.
+        slots: usize,
+    },
+    /// Loopback adapter (single VM).
+    Loopback,
+    /// Unix IPC socket.
+    UnixIpc {
+        /// Filesystem path to the socket.
+        path: String,
+    },
+    /// Enclave proxy.
+    EnclaveProxy,
+}
+
+/// Attestation handshake material for adapter negotiation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityAttestation {
+    /// Nonce bound in the attestation evidence.
+    pub nonce: String,
+    /// Expected runtime identity (TEE measurement or chip id).
+    pub expected_runtime_id: Option<String>,
+    /// Expected statement hash for verification.
+    pub expected_statement_hash: Option<Hash>,
+    /// Optional evidence bundle presented during negotiation.
+    #[serde(default)]
+    pub presented: Option<Attestation>,
+}
+
+/// Capability advertisement payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportCapability {
+    /// Domain emitting the advertisement.
+    pub domain: CapabilityDomain,
+    /// Supported protocol versions.
+    pub supported_versions: Vec<String>,
+    /// Maximum envelope size supported.
+    pub max_message_bytes: usize,
+    /// Advertised adapters.
+    pub adapters: Vec<TransportAdapterCapability>,
+}
+
+/// Per-adapter capability advertisement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportAdapterCapability {
+    /// Adapter kind and parameters.
+    pub adapter: CapabilityAdapterKind,
+    /// Optional feature flags (compression, streaming).
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Optional attestation handshake material.
+    #[serde(default)]
+    pub attestation: Option<CapabilityAttestation>,
+}
+
+/// Binding selected after capability negotiation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportBinding {
+    /// Domain that will use the adapter.
+    pub domain: CapabilityDomain,
+    /// Adapter chosen for the binding.
+    pub adapter: TransportAdapterCapability,
 }
 
 /// Muscle execution intents and telemetry.
@@ -521,7 +623,9 @@ impl EventKind {
         match self {
             EventKind::Control(ControlEvent::ChannelAnnouncement { .. })
             | EventKind::Control(ControlEvent::AttestationNotice { .. })
-            | EventKind::Control(ControlEvent::WorkflowContract { .. }) => EventIntent::Notify,
+            | EventKind::Control(ControlEvent::WorkflowContract { .. })
+            | EventKind::Control(ControlEvent::TransportCapability { .. })
+            | EventKind::Control(ControlEvent::TransportBinding { .. }) => EventIntent::Notify,
             EventKind::Muscle(MuscleEvent::InvocationRequest { .. })
             | EventKind::Audit(AuditEvent::InferenceRequested { .. })
             | EventKind::Audit(AuditEvent::LogQuery { .. })
@@ -645,11 +749,10 @@ impl LedgerEvent {
                 "unexpected payload_type: {payload_type}"
             )));
         }
-        serde_json::from_value(env.body.payload.clone())
-            .map(|mut event: LedgerEvent| {
-                event.attestations = env.attestations.clone();
-                event
-            })
+        serde_json::from_value(env.body.payload.clone()).map(|mut event: LedgerEvent| {
+            event.attestations = env.attestations.clone();
+            event
+        })
     }
 }
 
