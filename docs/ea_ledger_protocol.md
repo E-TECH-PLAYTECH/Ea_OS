@@ -313,3 +313,53 @@ Structured envelope payload for `event_class=Attestation` or `attestation_eviden
 - Enforce policy tags at ingress; reject envelopes lacking mandatory attestation formats for restricted domains.
 
 This protocol specification is intended to be production-ready: deterministic hashing, strict validation, explicit negotiation, and backward compatibility ensure that Arda companions, muscles, and external auditors share a coherent, verifiable event stream.
+
+## 11. Deterministic replay and forensic pipeline
+
+- **Replay inputs**: deterministic replay runs from a trusted block store snapshot plus a frozen policy bundle (`policy_hash`, evaluator version, and capability negotiation matrix). The replay coordinator rejects input where `policy_hash` differs from the policy tag present in the block headers.
+- **Execution model**: the replay engine rehydrates envelopes in canonical order, verifying Merkle proofs and signatures before emitting events to the state machine. All side effects are redirected to a sandboxed ledger state (no network I/O) to guarantee repeatability.
+- **Determinism guards**: runtime must expose a deterministic clock (derived from block timestamps), stable hashing (RFC8785 JSON, deterministic CBOR), and pure reducers. Any nondeterministic hook (randomness, wall clock, external service calls) must be modeled as deterministic inputs derived from envelope payloads.
+- **Checkpointing**: every N blocks (configurable, e.g., 1k) the replay engine emits a signed checkpoint `{height, state_root, policy_hash, attestation_digest}`. Checkpoints enable fast-forward replay and are themselves envelope-addressable artifacts.
+- **Forensics mode**: when replay diverges, the engine emits a structured `Alert` with the divergence height, mismatching state roots, and the minimal repro bundle (block range + policy bundle + replay inputs) to allow off-cluster investigation.
+
+## 12. Merkle-proof export bundles
+
+- **Purpose**: allow auditors to verify any envelope or block range without access to the full ledger. Bundles are detached artifacts that chain to the canonical ledger via Merkle proofs and optional L2 anchors.
+- **Format**: a `bundle.manifest.json` (or CBOR) containing `{channel, start_height, end_height, block_hashes, merkle_proofs[], payload_refs[], policy_hash, created_at, signer}` plus the referenced envelope payloads and proofs. Bundles are signed and compressed (e.g., `tar+zstd`).
+- **Proof contents**: for each envelope, include the envelope bytes, its hash, sibling hashes up to the block Merkle root, and the block header signature. For range proofs, include block headers and an outer range Merkle root to prove continuity.
+- **Validation workflow**: (1) verify bundle signature; (2) recompute envelope hashes; (3) verify each Merkle path to the block root; (4) verify block header signatures; (5) reconcile `policy_hash` with local policy to detect drift.
+- **Streaming export**: exporters operate off follower nodes or cold replicas to avoid impacting primaries. Export jobs are idempotent, chunked by height ranges, and resumable via the manifest metadata.
+
+## 13. Retention and rotation policies
+
+- **Tiered retention**: hot storage keeps the last M days or N blocks for low-latency reads; warm storage retains compressed blocks and Merkle manifests; cold storage (WORM/S3 Glacier) holds immutable archives and periodic checkpoints. All tiers store cryptographic proofs to allow reconstitution.
+- **Rotation cadence**: policy bundles, signing keys, and attestation roots have explicit lifetimes (e.g., 90-day rotation with 30-day overlap). Rotation events are recorded as `CapabilityAdvertisement` or `Alert` envelopes carrying the new fingerprints and effective timestamps.
+- **Deletion rules**: blocks are immutable; retention expiry triggers archival, not rewrite. If legal/compliance requires removal of payloads, use `payload_ref` with tombstones while keeping hashes to preserve auditability.
+- **Compaction**: optional compaction emits summary blocks `{start_height, end_height, summary_root}` with deterministic derivation from original blocks to keep replay integrity intact. Compaction outputs are themselves signed and anchored.
+- **Key escrow and recovery**: policy requires dual control for key destruction and rotation; recovery drills periodically verify that archived checkpoints plus keys can rebuild a follower node in a sterile environment.
+
+## 14. Alerting on attestation staleness and policy drift
+
+- **Signals**:
+  - `attestation_age_seconds`: derived from `timestamp` vs. current wall clock and attestation freshness window.
+  - `policy_hash_mismatch`: binary metric when envelope policy tags differ from the active policy bundle hash.
+  - `attestation_chain_valid`: boolean for certificate/quote validity.
+- **Thresholds**: default alerts at 80% of freshness budget (e.g., TEE report older than 20 hours in a 24-hour SLA) and immediate paging for `policy_hash_mismatch` or revoked certificates.
+- **Instrumentation**: emit `Observation` envelopes for health signals, mirrored into Prometheus/OpenTelemetry metrics with labels `{channel, domain, protocol_version}`. Alertmanager rules fan out to paging and audit channels.
+- **Automated response**: policy drift or stale attestation triggers capability renegotiation; peers quarantine drifted nodes by refusing new sessions and backpressure replication until fresh evidence arrives.
+
+## 15. Load and chaos testing plans
+
+- **Load baselines**: benchmark per-transport throughput (envelopes/sec, block finalize latency, tail p99) across realistic payload sizes (1 KiB, 64 KiB, 1 MiB). Include sustained load and burst (10×) tests.
+- **Replay stress**: continuously run deterministic replay against the live feed plus synthetic corruptions to validate divergence detection and checkpoint recovery time.
+- **Chaos scenarios**: induce packet loss/jitter, disk full, Merkle root corruption, delayed attestation fetching, and key rotation mid-stream. Verify that alerts fire, replay rejects bad data, and healthy peers continue.
+- **Scalability drills**: scale followers horizontally under fan-out, validating catch-up time and export bundle generation under load. Measure how policy evaluation latency impacts ingestion TPS.
+- **Tooling**: prefer deterministic workload generators (e.g., reproducible seeds for envelope generation), tc/netem for network faults, and infra-as-code scripts to schedule chaos events. Every scenario must produce a machine-readable report with success criteria and regression baselines.
+
+## 16. Upgrade and deprecation process
+
+- **Version lifecycle**: each protocol version moves through `preview → active → maintenance → deprecated → disabled`. Active and maintenance versions are supported concurrently with explicit EOL dates. Capability negotiation advertises `supported_versions` and `retiring_versions` to peers.
+- **Rollout**: introduce new versions behind feature flags; upgrade followers first, then primaries, validating deterministic replay on both versions with identical checkpoints. Downgrade paths are tested by replaying the latest blocks with the older adapter to confirm read-compatibility.
+- **Deprecation gates**: refuse new sessions on deprecated versions after a configurable sunset; continue read-only support for a grace window to allow export bundle extraction. Alerts fire 30/14/7 days before sunset via `Alert` envelopes and ops tooling.
+- **Muscle artifacts**: muscles declare the minimum and maximum supported protocol versions in their manifests. Publishing a new muscle version requires fresh attestation evidence and a compatibility test against the target protocol version set. Deprecating a protocol version triggers validation that no active muscle declares it as exclusive.
+- **Documentation and change control**: every version change ships with a migration guide, replay validation transcript, and updated policy hashes. Change approvals require dual sign-off from ledger owners and security, with audit trails stored on-ledger as `Result` or `Attestation` envelopes.
