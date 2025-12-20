@@ -146,6 +146,16 @@ pub fn envelope_hash(env: &Envelope) -> Hash {
     *hasher.finalize().as_bytes()
 }
 
+/// Compute a deterministic hash for an attestation statement.
+pub fn hash_attestation_statement(statement: &AttestationKind) -> Hash {
+    let mut hasher = Hasher::new();
+    hasher.update(b"ea-ledger:attestation");
+    let encoded = serde_json::to_vec(statement)
+        .expect("AttestationKind serialization should not fail for trusted input");
+    hasher.update(&encoded);
+    *hasher.finalize().as_bytes()
+}
+
 /// Channel policy definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChannelPolicy {
@@ -300,6 +310,10 @@ pub fn validate_envelope(
         return Err(ValidationError::MissingAttestations);
     }
     for att in &env.attestations {
+        let computed_statement_hash = hash_attestation_statement(&att.statement);
+        if att.statement_hash != computed_statement_hash {
+            return Err(ValidationError::AttestationInvalid);
+        }
         let pk = ed25519_dalek::VerifyingKey::from_bytes(&att.issuer)
             .map_err(|_| ValidationError::AttestationInvalid)?;
         let signature = ed25519_dalek::Signature::from_bytes(&att.signature);
