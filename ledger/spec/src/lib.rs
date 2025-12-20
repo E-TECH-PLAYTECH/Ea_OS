@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// Event and workflow schema layered on top of envelopes.
+pub mod events;
+
 /// Blake3 hash output (32 bytes).
 pub type Hash = [u8; 32];
 
