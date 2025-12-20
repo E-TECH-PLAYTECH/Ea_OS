@@ -15,6 +15,9 @@ use ledger_spec::{
     EnvelopeHeader, Signature, ValidationError,
 };
 
+/// Brainstem ledger orchestration: append flow, query surfaces, and receipts.
+pub mod brainstem;
+
 /// Append-only log identifier.
 pub type LogId = String;
 
@@ -38,6 +41,15 @@ impl AppendLog {
         mut env: Envelope,
         registry: &ChannelRegistry,
     ) -> Result<(), ValidationError> {
+        self.append_with_index(env, registry).map(|_| ())
+    }
+
+    /// Append an envelope and return its log index once validated.
+    pub fn append_with_index(
+        &self,
+        mut env: Envelope,
+        registry: &ChannelRegistry,
+    ) -> Result<usize, ValidationError> {
         let mut entries = self.entries.write();
         let prev_hash = entries.last().map(envelope_hash);
         if env.header.prev.is_none() {
@@ -48,8 +60,9 @@ impl AppendLog {
             last_timestamp: entries.last().map(|e| e.header.timestamp),
         };
         let _ = ledger_spec::validate_envelope(&env, registry, &prev_state)?;
+        let index = entries.len();
         entries.push(env);
-        Ok(())
+        Ok(index)
     }
 
     /// Read a slice of envelopes.
@@ -69,24 +82,18 @@ impl AppendLog {
         if entries.is_empty() {
             return None;
         }
-        let mut leaves: Vec<[u8; 32]> = entries.iter().map(envelope_hash).collect();
-        while leaves.len() > 1 {
-            leaves = leaves
-                .chunks(2)
-                .map(|chunk| {
-                    let mut hasher = Hasher::new();
-                    hasher.update(b"ea-ledger:merkle");
-                    hasher.update(&chunk[0]);
-                    if chunk.len() == 2 {
-                        hasher.update(&chunk[1]);
-                    } else {
-                        hasher.update(&chunk[0]);
-                    }
-                    *hasher.finalize().as_bytes()
-                })
-                .collect();
+        let leaves: Vec<[u8; 32]> = entries.iter().map(envelope_hash).collect();
+        compute_merkle_root(&leaves)
+    }
+
+    /// Produce a Merkle receipt for a specific log entry.
+    pub fn receipt_for(&self, index: usize) -> Option<MerkleReceipt> {
+        let entries = self.entries.read();
+        if index >= entries.len() {
+            return None;
         }
-        leaves.into_iter().next()
+        let leaves: Vec<[u8; 32]> = entries.iter().map(envelope_hash).collect();
+        MerkleReceipt::from_leaves(&leaves, index)
     }
 }
 
@@ -197,27 +204,132 @@ impl MerkleSegmenter {
 }
 
 fn compute_merkle(items: &[[u8; 32]]) -> [u8; 32] {
+    compute_merkle_root(items).unwrap_or([0u8; 32])
+}
+
+fn merkle_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Hasher::new();
+    hasher.update(b"ea-ledger:merkle");
+    hasher.update(left);
+    hasher.update(right);
+    *hasher.finalize().as_bytes()
+}
+
+fn compute_merkle_root(items: &[[u8; 32]]) -> Option<[u8; 32]> {
     let mut leaves = items.to_vec();
     if leaves.is_empty() {
-        return [0u8; 32];
+        return None;
     }
     while leaves.len() > 1 {
         leaves = leaves
             .chunks(2)
-            .map(|chunk| {
-                let mut hasher = Hasher::new();
-                hasher.update(b"ea-ledger:merkle");
-                hasher.update(&chunk[0]);
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
-                } else {
-                    hasher.update(&chunk[0]);
-                }
-                *hasher.finalize().as_bytes()
+            .map(|chunk| match chunk {
+                [left, right] => merkle_parent(left, right),
+                [solo] => merkle_parent(solo, solo),
+                _ => unreachable!(),
             })
             .collect();
     }
-    leaves[0]
+    leaves.into_iter().next()
+}
+
+/// Merkle path position for a sibling hash.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProofPosition {
+    /// Sibling sits to the left of the node being proven.
+    Left,
+    /// Sibling sits to the right of the node being proven.
+    Right,
+}
+
+/// A node along a Merkle proof path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProofNode {
+    /// The sibling hash at this level.
+    pub sibling: [u8; 32],
+    /// Whether the sibling is left or right of the path node.
+    pub position: ProofPosition,
+}
+
+/// Receipt proving inclusion of a log entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerkleReceipt {
+    /// Index of the leaf in the log.
+    pub index: usize,
+    /// Total leaf count at time of receipt generation.
+    pub leaf_count: usize,
+    /// Hash of the leaf being proven (envelope hash).
+    pub leaf: [u8; 32],
+    /// Merkle root over the log at generation time.
+    pub root: [u8; 32],
+    /// Proof path from leaf to root.
+    pub path: Vec<ProofNode>,
+}
+
+impl MerkleReceipt {
+    /// Build a receipt from a set of leaves and a target index.
+    pub fn from_leaves(leaves: &[[u8; 32]], index: usize) -> Option<Self> {
+        if leaves.is_empty() || index >= leaves.len() {
+            return None;
+        }
+
+        let mut path = Vec::new();
+        let mut current_index = index;
+        let mut level = leaves.to_vec();
+
+        while level.len() > 1 {
+            let sibling_index = if current_index % 2 == 0 {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+            let sibling = if sibling_index < level.len() {
+                level[sibling_index]
+            } else {
+                level[current_index]
+            };
+            let position = if current_index % 2 == 0 {
+                ProofPosition::Right
+            } else {
+                ProofPosition::Left
+            };
+            path.push(ProofNode { sibling, position });
+
+            let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+            for chunk in level.chunks(2) {
+                match chunk {
+                    [left, right] => next_level.push(merkle_parent(left, right)),
+                    [solo] => next_level.push(merkle_parent(solo, solo)),
+                    _ => unreachable!(),
+                }
+            }
+            current_index /= 2;
+            level = next_level;
+        }
+
+        Some(MerkleReceipt {
+            index,
+            leaf_count: leaves.len(),
+            leaf: leaves[index],
+            root: level[0],
+            path,
+        })
+    }
+
+    /// Verify this receipt against the embedded root.
+    pub fn verify(&self) -> bool {
+        if self.path.is_empty() && self.leaf_count != 1 {
+            return false;
+        }
+        let mut hash = self.leaf;
+        for node in &self.path {
+            hash = match node.position {
+                ProofPosition::Left => merkle_parent(&node.sibling, &hash),
+                ProofPosition::Right => merkle_parent(&hash, &node.sibling),
+            };
+        }
+        hash == self.root
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +420,21 @@ mod tests {
         let seq = vec![env1, env2];
         let err = validator.validate_sequence(&seq).unwrap_err();
         assert_eq!(err, ValidationError::BodyHashMismatch);
+    }
+
+    #[test]
+    fn merkle_receipt_roundtrip() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let reg = registry(&sk);
+        let log = AppendLog::new();
+        let mut prev = None;
+        for ts in 1..=4 {
+            let env = sample_env(prev, ts, &sk);
+            prev = Some(envelope_hash(&env));
+            log.append(env, &reg).unwrap();
+        }
+        let receipt = log.receipt_for(2).expect("receipt exists");
+        assert!(receipt.verify());
+        assert_eq!(receipt.index, 2);
     }
 }

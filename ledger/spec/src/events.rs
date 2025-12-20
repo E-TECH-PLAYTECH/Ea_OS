@@ -14,7 +14,7 @@ use crate::{
     Timestamp,
 };
 use blake3::Hasher;
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as DeError, Deserialize, Serialize};
 
 /// Payload type tag for typed events carried inside envelope bodies.
 pub const EVENT_PAYLOAD_TYPE: &str = "ea.event.v1";
@@ -413,9 +413,9 @@ impl LedgerEvent {
             .body
             .payload_type
             .as_deref()
-            .ok_or_else(|| serde_json::Error::custom("missing payload_type for event"))?;
+            .ok_or_else(|| DeError::custom("missing payload_type for event"))?;
         if payload_type != EVENT_PAYLOAD_TYPE {
-            return Err(serde_json::Error::custom(format!(
+            return Err(DeError::custom(format!(
                 "unexpected payload_type: {payload_type}"
             )));
         }

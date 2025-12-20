@@ -6,6 +6,7 @@
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -60,6 +61,7 @@ pub struct Signature {
     /// Signer public key.
     pub signer: PublicKey,
     /// Signature bytes.
+    #[serde(with = "BigArray")]
     pub signature: SignatureBytes,
 }
 
@@ -96,6 +98,7 @@ pub struct Attestation {
     /// Hash of serialized statement (domain separated).
     pub statement_hash: Hash,
     /// Signature over statement hash.
+    #[serde(with = "BigArray")]
     pub signature: SignatureBytes,
 }
 

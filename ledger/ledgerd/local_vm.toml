@@ -1,0 +1,27 @@
+# Local VM deployment config for `ledgerd`.
+#
+# This profile keeps everything in-process (single writer, no shared memory),
+# mounts storage under /var/lib/ea-ledger, and exposes the Unix socket for
+# companion processes running on the same VM.
+
+[ledger]
+# Path where the append-only log and payload store should be persisted.
+data_dir = "/var/lib/ea-ledger"
+# Enforce single-writer mode; only the daemon appends.
+single_writer = true
+# Interval (in entries) for emitting Merkle checkpoints.
+checkpoint_interval = 32
+
+[transport]
+# Unix domain socket for local VM components.
+unix_socket = "/var/run/ea-ledger.sock"
+# Disable network listeners to avoid dynamic code paths.
+tcp_enabled = false
+
+[policy]
+# Optional path to a JSON channel registry; if omitted, defaults are used.
+registry_path = "/etc/ea-ledger/registry.json"
+# Disallow dynamic code loading.
+allow_dynamic_code = false
+# Disallow shared memory segments.
+allow_shared_memory = false
