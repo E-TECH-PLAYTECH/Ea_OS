@@ -17,6 +17,8 @@ use ledger_spec::{
 
 /// Brainstem ledger orchestration: append flow, query surfaces, and receipts.
 pub mod brainstem;
+/// Lifecycle management and enforcement for muscles.
+pub mod lifecycle;
 
 /// Append-only log identifier.
 pub type LogId = String;

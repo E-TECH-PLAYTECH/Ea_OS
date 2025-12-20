@@ -79,6 +79,117 @@ pub struct MuscleRef {
     pub version: u64,
 }
 
+/// Lifecycle stage of a muscle artifact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LifecycleStage {
+    /// Muscle has been registered with expected measurement.
+    Registered,
+    /// Sealed blob and attestation were accepted.
+    Sealed,
+    /// Muscle is eligible for invocation under policy constraints.
+    Active,
+    /// Muscle was retired and must not be executed.
+    Retired,
+}
+
+/// Lifecycle commands emitted on the ledger to drive state transitions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LifecycleCommand {
+    /// Register a new muscle measurement and policy tags.
+    Register {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Expected measurement hash for the muscle artifacts.
+        measurement: Hash,
+        /// Optional manifest or metadata reference.
+        manifest: Option<ContentRef>,
+        /// Policy tags that must be honored by invocations.
+        #[serde(default)]
+        policy_tags: Vec<String>,
+    },
+    /// Submit a sealed blob and accompanying attestation.
+    Seal {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Sealed blob reference (CAS locator + hash).
+        sealed_blob: ContentRef,
+        /// Measurement hash that the blob must match.
+        measurement: Hash,
+        /// Optional inline sealed blob bytes for CAS hydration.
+        #[serde(default)]
+        inline_blob: Option<Vec<u8>>,
+    },
+    /// Activate a muscle after policy confirmation.
+    Activate {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Policy bundle applied at activation.
+        policy: Option<ContentRef>,
+        /// Tags applied to the active policy bundle.
+        #[serde(default)]
+        policy_tags: Vec<String>,
+    },
+    /// Retire an existing muscle.
+    Retire {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Human-readable retirement reason.
+        reason: String,
+    },
+}
+
+/// Lifecycle update emitted after processing commands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LifecycleUpdate {
+    /// Registration accepted.
+    Registered {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Measurement recorded.
+        measurement: Hash,
+        /// Policy tags bound to the registration.
+        #[serde(default)]
+        policy_tags: Vec<String>,
+    },
+    /// Sealing accepted.
+    Sealed {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Blob reference stored in CAS.
+        sealed_blob: ContentRef,
+        /// Attestation statement hash that was validated.
+        attestation: Hash,
+    },
+    /// Activation successful.
+    Activated {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Policy reference now enforced.
+        policy: Option<ContentRef>,
+        /// Active policy tags.
+        #[serde(default)]
+        policy_tags: Vec<String>,
+    },
+    /// Retirement recorded.
+    Retired {
+        /// Target muscle reference.
+        muscle: MuscleRef,
+        /// Reason for retirement.
+        reason: String,
+    },
+}
+
+/// Lifecycle error emitted when a command cannot be honored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LifecycleError {
+    /// Target muscle reference.
+    pub muscle: MuscleRef,
+    /// Stage where the error occurred.
+    pub stage: LifecycleStage,
+    /// Error details.
+    pub reason: String,
+}
+
 /// Control-plane messages governing channels, attestations, and policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ControlEvent {
@@ -120,6 +231,9 @@ pub enum MuscleEvent {
         input: ContentRef,
         /// Optional policy or recipe reference to pin behavior.
         policy: Option<ContentRef>,
+        /// Tags describing which policy bundle must be enforced.
+        #[serde(default)]
+        policy_tags: Vec<String>,
         /// Channel where the result must be posted.
         return_channel: Channel,
         /// Whether deterministic replay is required for audit.
@@ -143,6 +257,12 @@ pub enum MuscleEvent {
         /// Structured metrics payload.
         metrics: ExecutionMetrics,
     },
+    /// Lifecycle commands and notifications.
+    LifecycleCommand(LifecycleCommand),
+    /// Lifecycle state updates.
+    LifecycleUpdate(LifecycleUpdate),
+    /// Lifecycle enforcement errors.
+    LifecycleError(LifecycleError),
 }
 
 /// Observability and performance counters for muscle runs.
@@ -319,7 +439,8 @@ impl EventKind {
             | EventKind::Audit(AuditEvent::ExportRequest { .. })
             | EventKind::Privacy(PrivacyEvent::ScanRequested { .. })
             | EventKind::Agency(AgencyEvent::BrowserFetch { .. })
-            | EventKind::Agency(AgencyEvent::TerminalCommand { .. }) => EventIntent::Request,
+            | EventKind::Agency(AgencyEvent::TerminalCommand { .. })
+            | EventKind::Muscle(MuscleEvent::LifecycleCommand(_)) => EventIntent::Request,
             EventKind::Muscle(MuscleEvent::InvocationResult { .. })
             | EventKind::Muscle(MuscleEvent::Telemetry { .. })
             | EventKind::Audit(AuditEvent::LogResult { .. })
@@ -328,7 +449,9 @@ impl EventKind {
             | EventKind::Privacy(PrivacyEvent::ActionApplied { .. })
             | EventKind::Agency(AgencyEvent::BrowserResult { .. })
             | EventKind::Agency(AgencyEvent::TerminalResult { .. })
-            | EventKind::Agency(AgencyEvent::ModelLoad { .. }) => EventIntent::Response,
+            | EventKind::Agency(AgencyEvent::ModelLoad { .. })
+            | EventKind::Muscle(MuscleEvent::LifecycleUpdate(_))
+            | EventKind::Muscle(MuscleEvent::LifecycleError(_)) => EventIntent::Response,
         }
     }
 }
@@ -472,6 +595,7 @@ mod tests {
             },
             input: sample_ref(),
             policy: None,
+            policy_tags: Vec::new(),
             return_channel: "muscle.results".into(),
             deterministic: true,
         };
