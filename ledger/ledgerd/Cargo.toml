@@ -1,0 +1,17 @@
+[package]
+name = "ledgerd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ledger-core = { path = "../core" }
+ledger-transport = { path = "../transport" }
+ledger-spec = { path = "../spec" }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+serde_json = { workspace = true }
