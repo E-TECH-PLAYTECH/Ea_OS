@@ -13,3 +13,7 @@ ledger-core = { path = "../core" }
 ledger-spec = { path = "../spec" }
 bincode = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }

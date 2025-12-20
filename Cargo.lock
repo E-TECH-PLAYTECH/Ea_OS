@@ -513,9 +513,13 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
+ "ed25519-dalek",
  "futures",
  "ledger-core",
  "ledger-spec",
+ "rand_core",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
