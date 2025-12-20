@@ -1,0 +1,19 @@
+[package]
+name = "ledger-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+bincode = { workspace = true }
+ledger-spec = { path = "../spec" }
+tracing = { workspace = true }

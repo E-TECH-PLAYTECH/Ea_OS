@@ -1,0 +1,15 @@
+[package]
+name = "ledger-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+ledger-core = { path = "../core" }
+ledger-spec = { path = "../spec" }
+bincode = { workspace = true }
+futures = { workspace = true }
