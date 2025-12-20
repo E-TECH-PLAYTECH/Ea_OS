@@ -73,21 +73,32 @@ pub struct Signature {
 pub enum AttestationKind {
     /// Build-time attestation of a muscle blob.
     Build {
+        /// Hash of the attested artifact stored in CAS.
         artifact_hash: Hash,
+        /// Identity of the builder or pipeline producing the artifact.
         builder: String,
     },
     /// Runtime attestation of execution environment.
     Runtime {
+        /// Identifier of the runtime environment (e.g., TEE instance).
         runtime_id: String,
+        /// Policy hash enforced by the runtime.
         policy_hash: Hash,
     },
     /// Policy distribution bundle.
     Policy {
+        /// Hash of the distributed policy bundle.
         bundle_hash: Hash,
+        /// Expiration timestamp for the policy bundle.
         expires_at: Timestamp,
     },
     /// Custom attestation with opaque payload hash.
-    Custom { label: String, payload_hash: Hash },
+    Custom {
+        /// Domain-separated label for the custom attestation.
+        label: String,
+        /// Hash of the attested payload.
+        payload_hash: Hash,
+    },
 }
 
 /// Attestation attached to an envelope.

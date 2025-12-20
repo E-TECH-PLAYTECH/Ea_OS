@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::{DataSensitivity, EventIntent};
-use crate::{Audience, EventId, PublicKey, Timestamp};
+use crate::events::{Audience, DataSensitivity, EventId, EventIntent};
+use crate::{PublicKey, Timestamp};
 
 /// Identifier for a versioned policy bundle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

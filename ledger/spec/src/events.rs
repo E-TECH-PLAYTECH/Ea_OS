@@ -10,8 +10,8 @@
 //! payload tag, and round-trip between typed events and ledger envelopes.
 
 use crate::{
-    hash_body, policy::PolicyAlert, policy::PolicyDecision, policy::PolicyDefinition, Channel,
-    Envelope, EnvelopeBody, EnvelopeHeader, Hash, PublicKey, SchemaVersion, Timestamp,
+    hash_body, policy::PolicyAlert, policy::PolicyDecision, policy::PolicyDefinition, Attestation,
+    Channel, Envelope, EnvelopeBody, EnvelopeHeader, Hash, PublicKey, SchemaVersion, Timestamp,
 };
 use blake3::Hasher;
 use serde::{de::Error as DeError, Deserialize, Serialize};
@@ -281,6 +281,35 @@ pub struct ExecutionMetrics {
 /// Ledger-driven audit events.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuditEvent {
+    /// Deterministic inference request with justification for audit trails.
+    InferenceRequested {
+        /// Target muscle reference to execute.
+        muscle: MuscleRef,
+        /// Input bundle stored in CAS.
+        input: ContentRef,
+        /// Human-readable justification or ticket reference.
+        justification: String,
+        /// Return channel for the inference result.
+        return_channel: Channel,
+        /// Requester identity for non-repudiation.
+        requester: PublicKey,
+    },
+    /// Logged inference result with proof material.
+    InferenceLogged {
+        /// Target muscle reference executed.
+        muscle: MuscleRef,
+        /// Output bundle stored in CAS.
+        output: ContentRef,
+        /// Optional execution metrics.
+        #[serde(default)]
+        metrics: Option<ExecutionMetrics>,
+        /// Serialized Merkle receipt bundle proving inclusion.
+        #[serde(default)]
+        proof: Option<ContentRef>,
+        /// Correlation identifier to the request.
+        #[serde(default)]
+        request: Option<EventId>,
+    },
     /// Query a bounded window of envelopes.
     LogQuery {
         /// Channel being queried.
@@ -296,6 +325,9 @@ pub enum AuditEvent {
         channel: Channel,
         /// Returned envelopes encoded as content reference.
         records: ContentRef,
+        /// Serialized Merkle proofs for non-repudiation.
+        #[serde(default)]
+        proof: Option<ContentRef>,
     },
     /// Export request for compliant audit bundle.
     ExportRequest {
@@ -305,11 +337,23 @@ pub enum AuditEvent {
         policy_hash: Hash,
         /// Return channel for the export artifact.
         return_channel: Channel,
+        /// Human justification anchoring the export.
+        #[serde(default)]
+        justification: String,
+        /// Requester identity for non-repudiation.
+        #[serde(default)]
+        requester: PublicKey,
     },
     /// Export materialization complete.
     ExportReady {
         /// Export artifact reference.
         artifact: ContentRef,
+        /// Proof bundle (Merkle receipts) for the export contents.
+        #[serde(default)]
+        merkle_bundle: Option<ContentRef>,
+        /// Original request correlation.
+        #[serde(default)]
+        request: Option<EventId>,
     },
 }
 
@@ -324,6 +368,9 @@ pub enum PrivacyEvent {
         policy: ContentRef,
         /// Return channel for findings.
         return_channel: Channel,
+        /// Muscle that will perform the scan.
+        #[serde(default)]
+        muscle: Option<MuscleRef>,
     },
     /// Findings produced by the privacy muscle.
     FindingsReady {
@@ -331,6 +378,9 @@ pub enum PrivacyEvent {
         findings: ContentRef,
         /// Severity summary for routing.
         severity: PrivacySeverity,
+        /// Muscle that produced the findings.
+        #[serde(default)]
+        muscle: Option<MuscleRef>,
     },
     /// Enforcement action applied to the content.
     ActionApplied {
@@ -338,6 +388,9 @@ pub enum PrivacyEvent {
         action: PrivacyAction,
         /// Target content reference after enforcement.
         target: ContentRef,
+        /// Muscle that applied the action.
+        #[serde(default)]
+        muscle: Option<MuscleRef>,
     },
 }
 
@@ -363,6 +416,8 @@ pub enum PrivacyAction {
     Block,
     /// Notify a specific channel.
     Alert(Channel),
+    /// Send a report bundle to a destination channel.
+    Report(Channel),
     /// Escalate to a principal list.
     Escalate(Vec<PublicKey>),
 }
@@ -383,6 +438,9 @@ pub enum AgencyEvent {
     BrowserResult {
         /// Content snapshot reference.
         content: ContentRef,
+        /// Optional summary stored in CAS.
+        #[serde(default)]
+        summary: Option<ContentRef>,
         /// Optional privacy scan reference applied to the snapshot.
         privacy: Option<ContentRef>,
     },
@@ -392,6 +450,9 @@ pub enum AgencyEvent {
         command: String,
         /// Return channel for command output.
         return_channel: Channel,
+        /// Optional human-readable justification for the command.
+        #[serde(default)]
+        justification: Option<String>,
     },
     /// Terminal output and audit trail reference.
     TerminalResult {
@@ -408,6 +469,11 @@ pub enum AgencyEvent {
         sealed_muscle: MuscleRef,
         /// Artifact bundle hash for attestation.
         artifact_hash: Hash,
+        /// Attestation reference proving the bundle.
+        #[serde(default)]
+        attestation: Option<ContentRef>,
+        /// Channel where registration/activation is tracked.
+        registry_channel: Channel,
     },
 }
 
@@ -457,6 +523,7 @@ impl EventKind {
             | EventKind::Control(ControlEvent::AttestationNotice { .. })
             | EventKind::Control(ControlEvent::WorkflowContract { .. }) => EventIntent::Notify,
             EventKind::Muscle(MuscleEvent::InvocationRequest { .. })
+            | EventKind::Audit(AuditEvent::InferenceRequested { .. })
             | EventKind::Audit(AuditEvent::LogQuery { .. })
             | EventKind::Audit(AuditEvent::ExportRequest { .. })
             | EventKind::Privacy(PrivacyEvent::ScanRequested { .. })
@@ -465,6 +532,7 @@ impl EventKind {
             | EventKind::Muscle(MuscleEvent::LifecycleCommand(_)) => EventIntent::Request,
             EventKind::Muscle(MuscleEvent::InvocationResult { .. })
             | EventKind::Muscle(MuscleEvent::Telemetry { .. })
+            | EventKind::Audit(AuditEvent::InferenceLogged { .. })
             | EventKind::Audit(AuditEvent::LogResult { .. })
             | EventKind::Audit(AuditEvent::ExportReady { .. })
             | EventKind::Privacy(PrivacyEvent::FindingsReady { .. })
@@ -500,6 +568,9 @@ pub struct LedgerEvent {
     pub intent: EventIntent,
     /// Optional attachments stored off-ledger.
     pub attachments: Vec<ContentRef>,
+    /// Optional attestations bound to the event envelope.
+    #[serde(default)]
+    pub attestations: Vec<Attestation>,
     /// Domain-specific payload.
     pub kind: EventKind,
 }
@@ -526,8 +597,15 @@ impl LedgerEvent {
             sensitivity,
             intent,
             attachments,
+            attestations: Vec::new(),
             kind,
         })
+    }
+
+    /// Attach attestations to the event for downstream validation and sealing.
+    pub fn with_attestations(mut self, attestations: Vec<Attestation>) -> Self {
+        self.attestations = attestations;
+        self
     }
 
     /// Convert the event into a ledger envelope with the prescribed payload tag.
@@ -551,7 +629,7 @@ impl LedgerEvent {
             },
             body,
             signatures: Vec::new(),
-            attestations: Vec::new(),
+            attestations: self.attestations.clone(),
         })
     }
 
@@ -568,6 +646,10 @@ impl LedgerEvent {
             )));
         }
         serde_json::from_value(env.body.payload.clone())
+            .map(|mut event: LedgerEvent| {
+                event.attestations = env.attestations.clone();
+                event
+            })
     }
 }
 

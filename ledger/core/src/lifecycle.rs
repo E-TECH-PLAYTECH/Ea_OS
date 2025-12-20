@@ -7,7 +7,6 @@
 use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
-use ed25519_dalek::Verifier;
 use ledger_spec::events::{
     Audience, ContentRef, DataSensitivity, EventKind, LedgerEvent, LifecycleCommand,
     LifecycleError, LifecycleStage, LifecycleUpdate, MuscleEvent, MuscleRef,
@@ -62,7 +61,9 @@ pub struct MuscleLifecycleManager {
     registry: HashMap<MuscleKey, MuscleRecord>,
     store: ContentStore,
     issuer: PublicKey,
+    #[allow(dead_code)]
     lifecycle_channel: String,
+    #[allow(dead_code)]
     schema_version: SchemaVersion,
 }
 
@@ -200,40 +201,43 @@ impl MuscleLifecycleManager {
         inline_blob: &Option<Vec<u8>>,
         source: &LedgerEvent,
     ) -> Vec<LedgerEvent> {
-        let Some(record) = self.registry.get_mut(&Self::key(muscle)) else {
-            return vec![self.error_event(
-                muscle,
-                LifecycleStage::Registered,
-                "muscle not registered".into(),
-                source,
-            )];
-        };
+        let key = Self::key(muscle);
+        {
+            let Some(record) = self.registry.get(&key) else {
+                return vec![self.error_event(
+                    muscle,
+                    LifecycleStage::Registered,
+                    "muscle not registered".into(),
+                    source,
+                )];
+            };
 
-        if record.stage == LifecycleStage::Retired {
-            return vec![self.error_event(
-                muscle,
-                LifecycleStage::Retired,
-                "retired muscle cannot be sealed".into(),
-                source,
-            )];
-        }
+            if record.stage == LifecycleStage::Retired {
+                return vec![self.error_event(
+                    muscle,
+                    LifecycleStage::Retired,
+                    "retired muscle cannot be sealed".into(),
+                    source,
+                )];
+            }
 
-        if record.measurement != measurement {
-            return vec![self.error_event(
-                muscle,
-                LifecycleStage::Registered,
-                "measurement mismatch on sealing".into(),
-                source,
-            )];
-        }
+            if record.measurement != measurement {
+                return vec![self.error_event(
+                    muscle,
+                    LifecycleStage::Registered,
+                    "measurement mismatch on sealing".into(),
+                    source,
+                )];
+            }
 
-        if sealed_blob.hash != measurement {
-            return vec![self.error_event(
-                muscle,
-                LifecycleStage::Sealed,
-                "sealed blob hash does not match declared measurement".into(),
-                source,
-            )];
+            if sealed_blob.hash != measurement {
+                return vec![self.error_event(
+                    muscle,
+                    LifecycleStage::Sealed,
+                    "sealed blob hash does not match declared measurement".into(),
+                    source,
+                )];
+            }
         }
 
         if let Some(blob) = inline_blob {
@@ -251,12 +255,21 @@ impl MuscleLifecycleManager {
             self.store.put_with_digest(digest, blob.clone());
         }
 
-        let attestation_hash = match self.find_valid_attestation(&source.attestations, measurement)
-        {
-            Ok(hash) => hash,
-            Err(reason) => {
-                return vec![self.error_event(muscle, LifecycleStage::Sealed, reason, source)]
-            }
+        let attestation_hash =
+            match self.find_valid_attestation(&source.attestations, measurement) {
+                Ok(hash) => hash,
+                Err(reason) => {
+                    return vec![self.error_event(muscle, LifecycleStage::Sealed, reason, source)]
+                }
+            };
+
+        let Some(record) = self.registry.get_mut(&key) else {
+            return vec![self.error_event(
+                muscle,
+                LifecycleStage::Registered,
+                "muscle not registered".into(),
+                source,
+            )];
         };
 
         record.sealed_blob = Some(sealed_blob.clone());
@@ -283,7 +296,8 @@ impl MuscleLifecycleManager {
         policy_tags: &[String],
         source: &LedgerEvent,
     ) -> Vec<LedgerEvent> {
-        let Some(record) = self.registry.get_mut(&Self::key(muscle)) else {
+        let key = Self::key(muscle);
+        let Some(record) = self.registry.get(&key) else {
             return vec![self.error_event(
                 muscle,
                 LifecycleStage::Registered,
@@ -310,23 +324,33 @@ impl MuscleLifecycleManager {
             )];
         }
 
+        let mut attachments = Vec::new();
+        if let Some(policy_ref) = &policy {
+            attachments.push(policy_ref.clone());
+        }
+
+        let Some(record) = self.registry.get_mut(&key) else {
+            return vec![self.error_event(
+                muscle,
+                LifecycleStage::Registered,
+                "muscle not registered".into(),
+                source,
+            )];
+        };
+
         record.stage = LifecycleStage::Active;
         record.policy = policy.clone();
         if !policy_tags.is_empty() {
             record.policy_tags = policy_tags.to_vec();
         }
         record.last_error = None;
-
-        let mut attachments = Vec::new();
-        if let Some(policy_ref) = &policy {
-            attachments.push(policy_ref.clone());
-        }
+        let active_tags = record.policy_tags.clone();
 
         vec![self.lifecycle_event(
             MuscleEvent::LifecycleUpdate(LifecycleUpdate::Activated {
                 muscle: muscle.clone(),
                 policy,
-                policy_tags: record.policy_tags.clone(),
+                policy_tags: active_tags,
             }),
             attachments,
             source,
@@ -371,7 +395,7 @@ impl MuscleLifecycleManager {
         request_tags: &[String],
         source: &LedgerEvent,
     ) -> Vec<LedgerEvent> {
-        let Some(record) = self.registry.get_mut(&Self::key(muscle)) else {
+        let Some(record) = self.registry.get(&Self::key(muscle)) else {
             return vec![self.error_event(
                 muscle,
                 LifecycleStage::Registered,
