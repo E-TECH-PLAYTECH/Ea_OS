@@ -4,7 +4,8 @@ members = [
     "ledger/core",
     "ledger/transport",
     "ledger/ledgerd",
-    "ledger/arda"
+    "ledger/arda",
+    "ledger/ui-shell"
 ]
 resolver = "2"
 

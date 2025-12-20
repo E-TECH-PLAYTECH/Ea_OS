@@ -451,6 +451,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "ledger-arda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "blake3",
+ "bytes",
+ "clap",
+ "ed25519-dalek",
+ "futures",
+ "ledger-core",
+ "ledger-spec",
+ "ledger-transport",
+ "parking_lot",
+ "rand_core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ledger-core"
 version = "0.1.0"
 dependencies = [
@@ -477,6 +500,7 @@ dependencies = [
  "ed25519-dalek",
  "rand_core",
  "serde",
+ "serde-big-array",
  "serde_json",
  "thiserror",
 ]
@@ -494,6 +518,22 @@ dependencies = [
  "ledger-spec",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ledger-ui-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ledger-core",
+ "ledger-spec",
+ "ledger-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -714,6 +754,15 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

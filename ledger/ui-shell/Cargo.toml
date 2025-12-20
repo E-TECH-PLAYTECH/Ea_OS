@@ -1,0 +1,19 @@
+[package]
+name = "ledger-ui-shell"
+version = "0.1.0"
+edition = "2021"
+authors = ["Eä Foundation <contact@ea.foundation>"]
+description = "Cross-platform ledger UI shell with receipt printing and Merkle-proofed views"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ledger-core = { path = "../core" }
+ledger-transport = { path = "../transport" }
+ledger-spec = { path = "../spec" }
