@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use ledger_core::{signing, AppendLog};
-use ledger_spec::Envelope;
+use ledger_spec::{ChannelRegistry, Envelope};
 
 /// Transport error.
 pub type TransportResult<T> = Result<T, anyhow::Error>;
@@ -37,6 +37,7 @@ pub trait Transport: Send + Sync {
 pub struct InVmQueue {
     /// Append-only log.
     pub log: AppendLog,
+    registry: ChannelRegistry,
     tx: Sender<Envelope>,
 }
 
@@ -46,6 +47,17 @@ impl InVmQueue {
         let (tx, _) = broadcast::channel(1024);
         Self {
             log: AppendLog::new(),
+            registry: ChannelRegistry::new(),
+            tx,
+        }
+    }
+
+    /// Create a queue with explicit channel registry (policy enforcement).
+    pub fn with_registry(registry: ChannelRegistry) -> Self {
+        let (tx, _) = broadcast::channel(1024);
+        Self {
+            log: AppendLog::new(),
+            registry,
             tx,
         }
     }
@@ -54,8 +66,7 @@ impl InVmQueue {
 #[async_trait]
 impl Transport for InVmQueue {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
-        self.log
-            .append(env.clone(), &ledger_spec::ChannelRegistry::new())?;
+        self.log.append(env.clone(), &self.registry)?;
         let _ = self.tx.send(env);
         Ok(())
     }
