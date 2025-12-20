@@ -1,0 +1,24 @@
+# Brainstem ledger local VM deployment configuration (MVP)
+
+[ledger]
+# Directory for append-only log payload store (CAS).
+data_dir = "/var/lib/ea-ledger"
+# Maximum payload size in bytes (default: 8MiB).
+max_payload_bytes = 8388608
+# Merkle checkpoint interval.
+checkpoint_interval = 100
+
+[network]
+# Unix socket for local IPC clients.
+unix_socket = "/run/ea-ledger/ledger.sock"
+# Enable in-VM queue broadcast.
+in_vm_queue = true
+
+[security]
+# Disallow dynamic code/shmem payloads (enforced at validator).
+no_dynamic_code = true
+no_shared_memory = true
+
+[audit]
+# Emit alerts to stderr for validation failures.
+alert_sink = "stderr"
