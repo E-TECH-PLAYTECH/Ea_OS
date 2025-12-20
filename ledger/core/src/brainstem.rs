@@ -12,10 +12,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::{
-    envelope_hash, hash_body, AppendLog, ChannelRegistry, Envelope, MerkleReceipt, ProofNode,
-    ProofPosition,
-};
+use crate::{envelope_hash, hash_body, AppendLog, ChannelRegistry, Envelope, MerkleReceipt};
 
 /// Content-addressed payload store (blake3 digest).
 #[derive(Debug, Default, Clone)]
@@ -92,7 +89,12 @@ pub enum Alert {
     /// Validation failure on append.
     ValidationFailed(String),
     /// Query requested nonexistent slice.
-    QueryOutOfRange { from: usize, limit: usize },
+    QueryOutOfRange {
+        /// Starting offset requested by the caller.
+        from: usize,
+        /// Limit requested by the caller.
+        limit: usize,
+    },
 }
 
 /// Query slice request with proofs.
@@ -135,6 +137,23 @@ impl Ledger {
             store: ContentStore::default(),
             index: DomainIndex::default(),
         }
+    }
+
+    /// Access the underlying content-addressed store for attaching blobs.
+    pub fn content_store(&self) -> ContentStore {
+        self.store.clone()
+    }
+
+    /// Hash of the most recent envelope, if any.
+    pub fn tail_hash(&self) -> Option<[u8; 32]> {
+        let len = self.log.len();
+        if len == 0 {
+            return None;
+        }
+        self.log
+            .read(len - 1, 1)
+            .first()
+            .map(envelope_hash)
     }
 
     /// Append an envelope, enforce invariants, and return a receipt.
@@ -215,6 +234,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use rand_core::OsRng;
+    use crate::envelope_hash;
 
     fn registry_with(pk: [u8; 32]) -> ChannelRegistry {
         let mut reg = ChannelRegistry::new();

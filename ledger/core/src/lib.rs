@@ -2,17 +2,16 @@
 //! Merkle segmenter, checkpoint writer, and replay validator.
 #![deny(missing_docs)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use blake3::Hasher;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use ledger_spec::{
-    envelope_hash, hash_body, Attestation, ChannelRegistry, ChannelState, Envelope, EnvelopeBody,
-    EnvelopeHeader, Signature, ValidationError,
+    envelope_hash, hash_body, Attestation, ChannelRegistry, ChannelState, Envelope, Signature,
+    ValidationError,
 };
 
 /// Brainstem ledger orchestration: append flow, query surfaces, and receipts.
@@ -21,6 +20,8 @@ pub mod brainstem;
 pub mod lifecycle;
 /// Pluggable policy enforcement and decision emission.
 pub mod policy;
+/// Base application orchestrators (audit terminal, privacy analyzer, agency assistant).
+pub mod apps;
 
 /// Append-only log identifier.
 pub type LogId = String;
@@ -42,7 +43,7 @@ impl AppendLog {
     /// Append an envelope after validation.
     pub fn append(
         &self,
-        mut env: Envelope,
+        env: Envelope,
         registry: &ChannelRegistry,
     ) -> Result<(), ValidationError> {
         self.append_with_index(env, registry).map(|_| ())
@@ -341,6 +342,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use rand_core::OsRng;
+    use ledger_spec::{EnvelopeBody, EnvelopeHeader};
 
     fn sample_env(prev: Option<[u8; 32]>, ts: u64, sk: &SigningKey) -> Envelope {
         let body = EnvelopeBody {

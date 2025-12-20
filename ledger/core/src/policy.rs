@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use ledger_spec::events::{
-    AgencyEvent, Audience, AuditEvent, DataSensitivity, EventIntent, EventKind, LedgerEvent,
-    LifecycleCommand, LifecycleUpdate, MuscleEvent, PrivacyEvent,
+    AgencyEvent, Audience, AuditEvent, DataSensitivity, EventKind, LedgerEvent, LifecycleCommand,
+    LifecycleUpdate, MuscleEvent, PrivacyEvent,
 };
 use ledger_spec::policy::{
     PolicyAlert, PolicyAlertSeverity, PolicyBinding, PolicyDecision, PolicyDefinition,
@@ -255,6 +255,8 @@ fn event_kind_label(kind: &EventKind) -> String {
             MuscleEvent::LifecycleError(_) => "Muscle.LifecycleError".into(),
         },
         EventKind::Audit(audit) => match audit {
+            AuditEvent::InferenceRequested { .. } => "Audit.InferenceRequested".into(),
+            AuditEvent::InferenceLogged { .. } => "Audit.InferenceLogged".into(),
             AuditEvent::LogQuery { .. } => "Audit.LogQuery".into(),
             AuditEvent::LogResult { .. } => "Audit.LogResult".into(),
             AuditEvent::ExportRequest { .. } => "Audit.ExportRequest".into(),
@@ -506,7 +508,7 @@ fn command_approval_policy() -> PolicyDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, VerifyingKey};
+    use ed25519_dalek::VerifyingKey;
     use rand_core::OsRng;
 
     fn signer() -> SigningKey {
@@ -543,6 +545,8 @@ mod tests {
                 channel: "audit".into(),
                 policy_hash: [0x11; 32],
                 return_channel: "return".into(),
+                justification: "export".into(),
+                requester: [0u8; 32],
             }),
             DataSensitivity::Restricted,
         );
@@ -564,6 +568,7 @@ mod tests {
             EventKind::Agency(AgencyEvent::TerminalCommand {
                 command: "rm -rf /tmp".into(),
                 return_channel: "audit".into(),
+                justification: None,
             }),
             DataSensitivity::Internal,
         );
