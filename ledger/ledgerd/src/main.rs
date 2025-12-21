@@ -260,14 +260,16 @@ async fn main() -> anyhow::Result<()> {
             daemon(
                 checkpoint,
                 transport,
-                registry,
+                registry.clone(),
                 cli.status_addr,
                 &transport_config,
             )
             .await?
         }
-        Commands::Append { file } => append_from_file(file, transport).await?,
-        Commands::Read { offset, limit } => read_entries(offset, limit, transport).await?,
+        Commands::Append { file } => append_from_file(file, transport, &registry).await?,
+        Commands::Read { offset, limit } => {
+            read_entries(offset, limit, transport, &registry).await?
+        }
     }
     Ok(())
 }
@@ -345,9 +347,16 @@ async fn daemon(
 async fn append_from_file(
     path: String,
     transport: std::sync::Arc<dyn Transport>,
+    registry: &ChannelRegistry,
 ) -> anyhow::Result<()> {
     let data = tokio::fs::read(&path).await?;
     let mut env: ledger_spec::Envelope = serde_json::from_slice(&data)?;
+    if registry.policy_for(env.header.channel.as_str()).is_none() {
+        anyhow::bail!(
+            "channel {} not present in registry",
+            env.header.channel.as_str()
+        );
+    }
     // For demo, auto-sign with ephemeral key if no signatures.
     if env.signatures.is_empty() {
         let sk = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
@@ -362,6 +371,7 @@ async fn read_entries(
     offset: usize,
     limit: usize,
     transport: std::sync::Arc<dyn Transport>,
+    registry: &ChannelRegistry,
 ) -> anyhow::Result<()> {
     let span = tracing::info_span!(
         "cli_read",
@@ -375,6 +385,12 @@ async fn read_entries(
     let elapsed = start.elapsed().as_millis() as u64;
     span.record("latency_ms", &elapsed);
     for env in items {
+        if registry.policy_for(env.header.channel.as_str()).is_none() {
+            anyhow::bail!(
+                "channel {} not present in registry",
+                env.header.channel.as_str()
+            );
+        }
         println!(
             "channel={} ts={} payload={}",
             env.header.channel, env.header.timestamp, env.body.payload
