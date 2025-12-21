@@ -15,3 +15,6 @@ ledger-spec = { path = "../spec" }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+prometheus = "0.13"
+axum = { version = "0.7", features = ["json"] }

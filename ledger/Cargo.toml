@@ -30,6 +30,7 @@ serde_json = "1.0"
 tempfile = "3.10"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
 ledger-spec = { path = "spec" }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 
 [[bench]]
 name = "lattice_benchmarks"
