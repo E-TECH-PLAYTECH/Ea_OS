@@ -14,14 +14,14 @@ use ledger_spec::{
     ValidationError,
 };
 
+/// Base application orchestrators (audit terminal, privacy analyzer, agency assistant).
+pub mod apps;
 /// Brainstem ledger orchestration: append flow, query surfaces, and receipts.
 pub mod brainstem;
 /// Lifecycle management and enforcement for muscles.
 pub mod lifecycle;
 /// Pluggable policy enforcement and decision emission.
 pub mod policy;
-/// Base application orchestrators (audit terminal, privacy analyzer, agency assistant).
-pub mod apps;
 
 /// Append-only log identifier.
 pub type LogId = String;
@@ -41,11 +41,7 @@ impl AppendLog {
     }
 
     /// Append an envelope after validation.
-    pub fn append(
-        &self,
-        env: Envelope,
-        registry: &ChannelRegistry,
-    ) -> Result<(), ValidationError> {
+    pub fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), ValidationError> {
         self.append_with_index(env, registry).map(|_| ())
     }
 
@@ -341,8 +337,8 @@ impl MerkleReceipt {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand_core::OsRng;
     use ledger_spec::{EnvelopeBody, EnvelopeHeader};
+    use rand_core::OsRng;
 
     fn sample_env(prev: Option<[u8; 32]>, ts: u64, sk: &SigningKey) -> Envelope {
         let body = EnvelopeBody {

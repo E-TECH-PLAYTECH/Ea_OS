@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -242,10 +242,48 @@ impl Transport for Loopback {
     }
 }
 
-/// Unix socket IPC transport.
+/// Unix IPC request/response frames.
+#[derive(Debug, Serialize, Deserialize)]
+enum IpcRequest {
+    Append(Envelope),
+    Read { offset: usize, limit: usize },
+    Subscribe,
+}
+
+/// Server-originated IPC messages.
+#[derive(Debug, Serialize, Deserialize)]
+enum IpcResponse {
+    AppendOk,
+    ReadOk(Vec<Envelope>),
+    SubscribeAck,
+    Error(String),
+}
+
+/// Server-originated events for subscribers.
+#[derive(Debug, Serialize, Deserialize)]
+enum IpcEvent {
+    Envelope(Envelope),
+}
+
+fn serialize_frame<T: Serialize>(msg: &T) -> TransportResult<Vec<u8>> {
+    let body = bincode::serialize(msg)?;
+    let mut out = (body.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+async fn read_frame(stream: &mut UnixStream) -> TransportResult<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+/// Unix socket IPC transport (server-side).
 pub struct UnixIpc {
     listener: UnixListener,
-    clients: Arc<Mutex<Vec<UnixStream>>>,
     log: AppendLog,
     broadcast: Sender<Envelope>,
     registry: ledger_spec::ChannelRegistry,
@@ -264,11 +302,16 @@ impl UnixIpc {
         let (tx, _) = broadcast::channel(1024);
         Ok(Self {
             listener,
-            clients: Arc::new(Mutex::new(Vec::new())),
             log: AppendLog::new(),
             broadcast: tx,
             registry,
         })
+    }
+
+    async fn append_env(&self, env: Envelope) -> TransportResult<()> {
+        self.log.append(env.clone(), &self.registry)?;
+        let _ = self.broadcast.send(env);
+        Ok(())
     }
 
     /// Start accepting connections.
@@ -276,9 +319,15 @@ impl UnixIpc {
         tokio::spawn(async move {
             loop {
                 match self.listener.accept().await {
-                    Ok((stream, _addr)) => {
+                    Ok((mut stream, _addr)) => {
                         info!("unix ipc: client connected");
-                        self.clients.lock().await.push(stream);
+                        let this = self.clone();
+                        tokio::spawn(async move {
+                            let res = this.handle_client(&mut stream).await;
+                            if let Err(err) = res {
+                                warn!("unix ipc client error: {err:?}");
+                            }
+                        });
                     }
                     Err(err) => {
                         warn!("unix ipc accept error: {err:?}");
@@ -288,23 +337,85 @@ impl UnixIpc {
             }
         })
     }
+
+    async fn handle_client(self: Arc<Self>, stream: &mut UnixStream) -> TransportResult<()> {
+        loop {
+            let frame = match read_frame(stream).await {
+                Ok(body) => body,
+                Err(err) => {
+                    warn!("unix ipc read error: {err:?}");
+                    break;
+                }
+            };
+            let req: IpcRequest = bincode::deserialize(&frame)?;
+            match req {
+                IpcRequest::Append(env) => {
+                    let result = self.append_env(env);
+                    let resp = match result.await {
+                        Ok(_) => IpcResponse::AppendOk,
+                        Err(err) => IpcResponse::Error(err.to_string()),
+                    };
+                    let bytes = serialize_frame(&resp)?;
+                    if let Err(err) = stream.write_all(&bytes).await {
+                        warn!("unix ipc append response error: {err:?}");
+                        break;
+                    }
+                }
+                IpcRequest::Read { offset, limit } => {
+                    let resp = match self.read(offset, limit).await {
+                        Ok(items) => IpcResponse::ReadOk(items),
+                        Err(err) => IpcResponse::Error(err.to_string()),
+                    };
+                    let bytes = serialize_frame(&resp)?;
+                    if let Err(err) = stream.write_all(&bytes).await {
+                        warn!("unix ipc read response error: {err:?}");
+                        break;
+                    }
+                }
+                IpcRequest::Subscribe => {
+                    let resp = serialize_frame(&IpcResponse::SubscribeAck)?;
+                    if let Err(err) = stream.write_all(&resp).await {
+                        warn!("unix ipc subscribe ack error: {err:?}");
+                        break;
+                    }
+                    let mut rx = self.broadcast.subscribe();
+                    let mut stream = stream.try_clone()?;
+                    tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(env) => {
+                                    let evt = serialize_frame(&IpcEvent::Envelope(env));
+                                    match evt {
+                                        Ok(bytes) => {
+                                            if let Err(err) = stream.write_all(&bytes).await {
+                                                warn!("unix ipc event send error: {err:?}");
+                                                break;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            warn!("unix ipc event serialize error: {err:?}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!("unix ipc subscriber error: {err:?}");
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Transport for UnixIpc {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
-        self.log.append(env.clone(), &self.registry)?;
-        let bytes = bincode::serialize(&env)?;
-        let mut clients = self.clients.lock().await;
-        clients.retain_mut(|c| {
-            let res = futures::executor::block_on(async {
-                c.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
-                c.write_all(&bytes).await
-            });
-            res.is_ok()
-        });
-        let _ = self.broadcast.send(env);
-        Ok(())
+        self.append_env(env).await
     }
 
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
@@ -313,6 +424,96 @@ impl Transport for UnixIpc {
 
     async fn subscribe(&self) -> TransportResult<Receiver<Envelope>> {
         Ok(self.broadcast.subscribe())
+    }
+}
+
+/// Unix IPC client transport that talks to a running daemon.
+#[derive(Debug, Clone)]
+pub struct UnixIpcClient {
+    path: String,
+    _registry: ChannelRegistry,
+}
+
+impl UnixIpcClient {
+    /// Connect to an existing Unix IPC listener.
+    pub async fn connect(path: String, registry: ChannelRegistry) -> TransportResult<Self> {
+        // Try a simple connection to validate the server is reachable.
+        let _ = UnixStream::connect(&path).await?;
+        Ok(Self {
+            path,
+            _registry: registry,
+        })
+    }
+
+    async fn send_request(&self, req: IpcRequest) -> TransportResult<IpcResponse> {
+        let mut stream = UnixStream::connect(&self.path).await?;
+        let bytes = serialize_frame(&req)?;
+        stream.write_all(&bytes).await?;
+        let body = read_frame(&mut stream).await?;
+        let resp: IpcResponse = bincode::deserialize(&body)?;
+        Ok(resp)
+    }
+}
+
+#[async_trait]
+impl Transport for UnixIpcClient {
+    async fn append(&self, env: Envelope) -> TransportResult<()> {
+        match self.send_request(IpcRequest::Append(env)).await? {
+            IpcResponse::AppendOk => Ok(()),
+            IpcResponse::Error(e) => Err(anyhow::anyhow!(e)),
+            other => Err(anyhow::anyhow!(format!(
+                "unexpected response for append: {other:?}"
+            ))),
+        }
+    }
+
+    async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
+        match self
+            .send_request(IpcRequest::Read { offset, limit })
+            .await?
+        {
+            IpcResponse::ReadOk(items) => Ok(items),
+            IpcResponse::Error(e) => Err(anyhow::anyhow!(e)),
+            other => Err(anyhow::anyhow!(format!(
+                "unexpected response for read: {other:?}"
+            ))),
+        }
+    }
+
+    async fn subscribe(&self) -> TransportResult<Receiver<Envelope>> {
+        let mut stream = UnixStream::connect(&self.path).await?;
+        let bytes = serialize_frame(&IpcRequest::Subscribe)?;
+        stream.write_all(&bytes).await?;
+        // Expect an ack
+        let resp_frame = read_frame(&mut stream).await?;
+        let resp: IpcResponse = bincode::deserialize(&resp_frame)?;
+        if !matches!(resp, IpcResponse::SubscribeAck) {
+            anyhow::bail!("unexpected subscribe response: {resp:?}");
+        }
+
+        let (tx, rx) = broadcast::channel(1024);
+        let mut stream = stream;
+        tokio::spawn(async move {
+            loop {
+                let frame = read_frame(&mut stream).await;
+                match frame {
+                    Ok(body) => match bincode::deserialize::<IpcEvent>(&body) {
+                        Ok(IpcEvent::Envelope(env)) => {
+                            let _ = tx.send(env);
+                        }
+                        Err(err) => {
+                            warn!("unix ipc client event decode error: {err:?}");
+                            break;
+                        }
+                    },
+                    Err(err) => {
+                        warn!("unix ipc client subscribe error: {err:?}");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(rx)
     }
 }
 
@@ -646,11 +847,17 @@ pub async fn bind_transport(
             let adapter = MailboxTransport::new(mailbox, slot_bytes, slots, registry, att)?;
             Ok(Arc::new(adapter))
         }
-        AdapterKind::UnixIpc { path } => {
-            let ipc = Arc::new(UnixIpc::bind(path, registry).await?);
-            let _handle = ipc.clone().start();
-            Ok(ipc)
-        }
+        AdapterKind::UnixIpc { path } => match UnixStream::connect(&path).await {
+            Ok(_) => {
+                let client = UnixIpcClient::connect(path, registry).await?;
+                Ok(Arc::new(client))
+            }
+            Err(_) => {
+                let ipc = Arc::new(UnixIpc::bind(path, registry).await?);
+                let _handle = ipc.clone().start();
+                Ok(ipc)
+            }
+        },
         AdapterKind::EnclaveProxy => {
             Err(anyhow::anyhow!("enclave proxy adapter not yet implemented"))
         }

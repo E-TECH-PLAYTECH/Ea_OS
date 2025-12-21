@@ -1,5 +1,5 @@
 //! Base application orchestrators built atop the ledger protocol.
-//! 
+//!
 //! Each orchestrator emits typed [`ledger_spec::events::LedgerEvent`] instances,
 //! signs them for non-repudiation, and pushes all artifacts through the
 //! [`crate::brainstem::Ledger`] content-addressed store to guarantee
@@ -10,12 +10,12 @@ use std::sync::Arc;
 use blake3::Hash as BlakeHash;
 use ed25519_dalek::SigningKey;
 use ledger_spec::events::{
-    AgencyEvent, AuditEvent, Audience, ContentRef, DataSensitivity, EventId, EventKind,
-    LedgerEvent, MuscleEvent, PrivacyAction, PrivacyEvent, LifecycleStage,
+    AgencyEvent, Audience, AuditEvent, ContentRef, DataSensitivity, EventId, EventKind,
+    LedgerEvent, LifecycleStage, MuscleEvent, PrivacyAction, PrivacyEvent,
 };
 use ledger_spec::{Attestation, Channel, Hash, PublicKey, SchemaVersion, Timestamp};
 
-use crate::brainstem::{AppendReceipt, Alert, Ledger, SliceQuery};
+use crate::brainstem::{Alert, AppendReceipt, Ledger, SliceQuery};
 use crate::lifecycle::MuscleLifecycleManager;
 use crate::signing;
 use crate::MerkleReceipt;
@@ -99,11 +99,7 @@ impl AppContext {
 
     fn store_receipt(&self, receipt: &MerkleReceipt) -> Result<ContentRef, AppError> {
         let encoded = serde_json::to_vec(receipt)?;
-        Ok(self.store_bytes(
-            encoded,
-            Some("application/json".into()),
-            None,
-        ))
+        Ok(self.store_bytes(encoded, Some("application/json".into()), None))
     }
 }
 
@@ -158,9 +154,9 @@ impl AuditTerminal {
         request: Option<EventId>,
         proof: ContentRef,
     ) -> Result<AppendReceipt, AppError> {
-        let output_ref = self
-            .ctx
-            .store_bytes(output, Some("application/octet-stream".into()), None);
+        let output_ref =
+            self.ctx
+                .store_bytes(output, Some("application/octet-stream".into()), None);
         let event = LedgerEvent::new(
             EventKind::Audit(AuditEvent::InferenceLogged {
                 muscle,
@@ -295,11 +291,9 @@ impl PrivacyAnalyzer {
         severity: ledger_spec::events::PrivacySeverity,
         muscle: ledger_spec::events::MuscleRef,
     ) -> Result<AppendReceipt, AppError> {
-        let findings_ref = self.ctx.store_bytes(
-            findings,
-            Some("application/json".into()),
-            None,
-        );
+        let findings_ref = self
+            .ctx
+            .store_bytes(findings, Some("application/json".into()), None);
         let event = LedgerEvent::new(
             EventKind::Privacy(PrivacyEvent::FindingsReady {
                 findings: findings_ref.clone(),
@@ -323,9 +317,9 @@ impl PrivacyAnalyzer {
         target: Vec<u8>,
         muscle: ledger_spec::events::MuscleRef,
     ) -> Result<AppendReceipt, AppError> {
-        let target_ref =
-            self.ctx
-                .store_bytes(target, Some("application/json".into()), None);
+        let target_ref = self
+            .ctx
+            .store_bytes(target, Some("application/json".into()), None);
         let event = LedgerEvent::new(
             EventKind::Privacy(PrivacyEvent::ActionApplied {
                 action,
@@ -451,9 +445,9 @@ impl AgencyAssistant {
         summary: Option<Vec<u8>>,
         privacy: Option<ContentRef>,
     ) -> Result<AppendReceipt, AppError> {
-        let content_ref = self
-            .ctx
-            .store_bytes(content, Some("application/octet-stream".into()), None);
+        let content_ref =
+            self.ctx
+                .store_bytes(content, Some("application/octet-stream".into()), None);
         let summary_ref = summary.map(|bytes| {
             self.ctx
                 .store_bytes(bytes, Some("text/markdown".into()), None)
@@ -491,16 +485,12 @@ impl AgencyAssistant {
         registry_channel: Channel,
     ) -> Result<AppendReceipt, AppError> {
         let artifact_digest = blake3::hash(&artifact);
-        let artifact_ref = self.ctx.store_bytes(
-            artifact,
-            Some("application/octet-stream".into()),
-            None,
-        );
-        let attestation_ref = self.ctx.store_bytes(
-            attestation_bytes,
-            Some("application/json".into()),
-            None,
-        );
+        let artifact_ref =
+            self.ctx
+                .store_bytes(artifact, Some("application/octet-stream".into()), None);
+        let attestation_ref =
+            self.ctx
+                .store_bytes(attestation_bytes, Some("application/json".into()), None);
         let event = LedgerEvent::new(
             EventKind::Agency(AgencyEvent::ModelLoad {
                 model_ref,
@@ -688,18 +678,19 @@ mod tests {
         )
     }
 
-    fn activate_muscle(manager: &mut MuscleLifecycleManager, muscle: ledger_spec::events::MuscleRef) {
+    fn activate_muscle(
+        manager: &mut MuscleLifecycleManager,
+        muscle: ledger_spec::events::MuscleRef,
+    ) {
         let seal_blob = manager.ingest_blob(b"sealed".to_vec(), None, None);
         let measurement = seal_blob.hash;
         let register = LedgerEvent::new(
-            EventKind::Muscle(MuscleEvent::LifecycleCommand(
-                LifecycleCommand::Register {
-                    muscle: muscle.clone(),
-                    measurement,
-                    manifest: None,
-                    policy_tags: Vec::new(),
-                },
-            )),
+            EventKind::Muscle(MuscleEvent::LifecycleCommand(LifecycleCommand::Register {
+                muscle: muscle.clone(),
+                measurement,
+                manifest: None,
+                policy_tags: Vec::new(),
+            })),
             [0u8; 32],
             Audience::Broadcast,
             now_millis(),
@@ -719,19 +710,14 @@ mod tests {
             statement_hash,
             signature: [0u8; 64],
         };
-        signing::sign_attestation(
-            &mut attestation,
-            &SigningKey::generate(&mut OsRng),
-        );
+        signing::sign_attestation(&mut attestation, &SigningKey::generate(&mut OsRng));
         let seal = LedgerEvent::new(
-            EventKind::Muscle(MuscleEvent::LifecycleCommand(
-                LifecycleCommand::Seal {
-                    muscle: muscle.clone(),
-                    sealed_blob: seal_blob.clone(),
-                    measurement,
-                    inline_blob: None,
-                },
-            )),
+            EventKind::Muscle(MuscleEvent::LifecycleCommand(LifecycleCommand::Seal {
+                muscle: muscle.clone(),
+                sealed_blob: seal_blob.clone(),
+                measurement,
+                inline_blob: None,
+            })),
             [0u8; 32],
             Audience::Broadcast,
             now_millis(),
@@ -742,13 +728,11 @@ mod tests {
         .unwrap()
         .with_attestations(vec![attestation]);
         let activate = LedgerEvent::new(
-            EventKind::Muscle(MuscleEvent::LifecycleCommand(
-                LifecycleCommand::Activate {
-                    muscle,
-                    policy: None,
-                    policy_tags: Vec::new(),
-                },
-            )),
+            EventKind::Muscle(MuscleEvent::LifecycleCommand(LifecycleCommand::Activate {
+                muscle,
+                policy: None,
+                policy_tags: Vec::new(),
+            })),
             [0u8; 32],
             Audience::Broadcast,
             now_millis(),
