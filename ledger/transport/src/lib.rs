@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -15,10 +16,16 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::BroadcastStream;
+use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, warn};
 
 use ledger_core::{AppendLogStorage, PersistentAppendLog};
 use ledger_spec::{hash_attestation_statement, ChannelRegistry, Envelope};
+
+pub mod proto {
+    tonic::include_proto!("ledger.transport");
+}
 
 /// Transport error.
 pub type TransportResult<T> = Result<T, anyhow::Error>;
@@ -139,6 +146,232 @@ impl AttestationHandshake {
         }
         Ok(())
     }
+}
+
+fn hash_from_vec(bytes: &[u8]) -> TransportResult<ledger_spec::Hash> {
+    if bytes.len() != 32 {
+        anyhow::bail!("expected 32 byte hash, got {}", bytes.len());
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(bytes);
+    Ok(hash)
+}
+
+fn signature_from_vec(bytes: &[u8]) -> TransportResult<ledger_spec::SignatureBytes> {
+    if bytes.len() != 64 {
+        anyhow::bail!("expected 64 byte signature, got {}", bytes.len());
+    }
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(bytes);
+    Ok(sig)
+}
+
+fn attestation_from_proto(att: proto::Attestation) -> TransportResult<ledger_spec::Attestation> {
+    let statement = match att
+        .statement
+        .and_then(|s| s.kind)
+        .ok_or_else(|| anyhow::anyhow!("attestation statement missing"))?
+    {
+        proto::attestation_kind::Kind::Build(b) => ledger_spec::AttestationKind::Build {
+            artifact_hash: hash_from_vec(&b.artifact_hash)?,
+            builder: b.builder,
+        },
+        proto::attestation_kind::Kind::Runtime(r) => ledger_spec::AttestationKind::Runtime {
+            runtime_id: r.runtime_id,
+            policy_hash: hash_from_vec(&r.policy_hash)?,
+        },
+        proto::attestation_kind::Kind::Policy(p) => ledger_spec::AttestationKind::Policy {
+            bundle_hash: hash_from_vec(&p.bundle_hash)?,
+            expires_at: p.expires_at,
+        },
+        proto::attestation_kind::Kind::Custom(c) => ledger_spec::AttestationKind::Custom {
+            label: c.label,
+            payload_hash: hash_from_vec(&c.payload_hash)?,
+        },
+    };
+
+    Ok(ledger_spec::Attestation {
+        issuer: hash_from_vec(&att.issuer)?,
+        statement_hash: hash_from_vec(&att.statement_hash)?,
+        signature: signature_from_vec(&att.signature)?,
+        statement,
+    })
+}
+
+fn attestation_to_proto(att: &ledger_spec::Attestation) -> proto::Attestation {
+    let statement_kind = match &att.statement {
+        ledger_spec::AttestationKind::Build {
+            artifact_hash,
+            builder,
+        } => proto::attestation_kind::Kind::Build(proto::AttestationBuild {
+            artifact_hash: artifact_hash.to_vec(),
+            builder: builder.clone(),
+        }),
+        ledger_spec::AttestationKind::Runtime {
+            runtime_id,
+            policy_hash,
+        } => proto::attestation_kind::Kind::Runtime(proto::AttestationRuntime {
+            runtime_id: runtime_id.clone(),
+            policy_hash: policy_hash.to_vec(),
+        }),
+        ledger_spec::AttestationKind::Policy {
+            bundle_hash,
+            expires_at,
+        } => proto::attestation_kind::Kind::Policy(proto::AttestationPolicy {
+            bundle_hash: bundle_hash.to_vec(),
+            expires_at: *expires_at,
+        }),
+        ledger_spec::AttestationKind::Custom {
+            label,
+            payload_hash,
+        } => proto::attestation_kind::Kind::Custom(proto::AttestationCustom {
+            label: label.clone(),
+            payload_hash: payload_hash.to_vec(),
+        }),
+    };
+
+    proto::Attestation {
+        issuer: att.issuer.to_vec(),
+        statement: Some(proto::AttestationKind {
+            kind: Some(statement_kind),
+        }),
+        statement_hash: att.statement_hash.to_vec(),
+        signature: att.signature.to_vec(),
+    }
+}
+
+fn envelope_from_proto(env: proto::Envelope) -> TransportResult<Envelope> {
+    let header = env
+        .header
+        .ok_or_else(|| anyhow::anyhow!("envelope header missing"))?;
+    let body = env
+        .body
+        .ok_or_else(|| anyhow::anyhow!("envelope body missing"))?;
+    let payload: serde_json::Value = serde_json::from_str(&body.payload_json)?;
+    let prev = if header.prev.is_empty() {
+        None
+    } else {
+        Some(hash_from_vec(&header.prev)?)
+    };
+
+    Ok(Envelope {
+        header: ledger_spec::EnvelopeHeader {
+            channel: header.channel,
+            version: header.version as u16,
+            prev,
+            body_hash: hash_from_vec(&header.body_hash)?,
+            timestamp: header.timestamp,
+        },
+        body: ledger_spec::EnvelopeBody {
+            payload,
+            payload_type: if body.payload_type.is_empty() {
+                None
+            } else {
+                Some(body.payload_type)
+            },
+        },
+        signatures: env
+            .signatures
+            .into_iter()
+            .map(|s| {
+                Ok(ledger_spec::Signature {
+                    signer: hash_from_vec(&s.signer)?,
+                    signature: signature_from_vec(&s.signature)?,
+                })
+            })
+            .collect::<TransportResult<Vec<_>>>()?,
+        attestations: env
+            .attestations
+            .into_iter()
+            .map(attestation_from_proto)
+            .collect::<TransportResult<Vec<_>>>()?,
+    })
+}
+
+fn envelope_to_proto(env: &Envelope) -> TransportResult<proto::Envelope> {
+    Ok(proto::Envelope {
+        header: Some(proto::EnvelopeHeader {
+            channel: env.header.channel.clone(),
+            version: env.header.version as u32,
+            prev: env.header.prev.map(|h| h.to_vec()).unwrap_or_default(),
+            body_hash: env.header.body_hash.to_vec(),
+            timestamp: env.header.timestamp,
+        }),
+        body: Some(proto::EnvelopeBody {
+            payload_json: env.body.payload.to_string(),
+            payload_type: env.body.payload_type.clone().unwrap_or_default(),
+        }),
+        signatures: env
+            .signatures
+            .iter()
+            .map(|s| proto::Signature {
+                signer: s.signer.to_vec(),
+                signature: s.signature.to_vec(),
+            })
+            .collect(),
+        attestations: env.attestations.iter().map(attestation_to_proto).collect(),
+    })
+}
+
+fn handshake_from_proto(
+    handshake: Option<proto::Handshake>,
+) -> TransportResult<Option<AttestationHandshake>> {
+    match handshake {
+        None => Ok(None),
+        Some(h) => Ok(Some(AttestationHandshake {
+            nonce: h.nonce,
+            expected_runtime_id: if h.expected_runtime_id.is_empty() {
+                None
+            } else {
+                Some(h.expected_runtime_id)
+            },
+            expected_statement_hash: if h.expected_statement_hash.is_empty() {
+                None
+            } else {
+                Some(hash_from_vec(&h.expected_statement_hash)?)
+            },
+            presented: h.presented.map(attestation_from_proto).transpose()?,
+        })),
+    }
+}
+
+fn handshake_to_proto(handshake: &Option<AttestationHandshake>) -> Option<proto::Handshake> {
+    handshake.as_ref().map(|h| proto::Handshake {
+        nonce: h.nonce.clone(),
+        expected_runtime_id: h.expected_runtime_id.clone().unwrap_or_default(),
+        expected_statement_hash: h
+            .expected_statement_hash
+            .map(|h| h.to_vec())
+            .unwrap_or_default(),
+        presented: h.presented.as_ref().map(attestation_to_proto),
+    })
+}
+
+fn verify_with_expected(
+    expected: &Option<AttestationHandshake>,
+    provided: Option<AttestationHandshake>,
+) -> TransportResult<()> {
+    let mut handshake = match expected {
+        Some(template) => {
+            let mut h = template.clone();
+            if let Some(provided) = provided {
+                h.presented = provided.presented;
+            }
+            h
+        }
+        None => provided.unwrap_or(AttestationHandshake {
+            nonce: String::new(),
+            expected_runtime_id: None,
+            expected_statement_hash: None,
+            presented: None,
+        }),
+    };
+    if handshake.presented.is_none()
+        && (handshake.expected_runtime_id.is_some() || handshake.expected_statement_hash.is_some())
+    {
+        anyhow::bail!("attestation required but not provided");
+    }
+    handshake.verify()
 }
 
 /// Adapter capability advertised on the ledger.
@@ -582,72 +815,257 @@ impl EnclaveProxyStub {
     }
 }
 
-/// QUIC/gRPC adapter that mirrors queue semantics while enforcing attestation.
-#[derive(Debug, Clone)]
-pub struct QuicGrpcAdapter {
+/// gRPC transport server implementing append/read/subscribe semantics with attestation enforcement.
+struct GrpcTransportService {
     log: Arc<dyn AppendLogStorage>,
     broadcast: Sender<Envelope>,
     registry: ChannelRegistry,
-    endpoint: String,
-    _attestation: Option<AttestationHandshake>,
+    attestation: Option<AttestationHandshake>,
     queue_depth: usize,
+}
+
+impl GrpcTransportService {
+    fn new(
+        log: Arc<dyn AppendLogStorage>,
+        registry: ChannelRegistry,
+        attestation: Option<AttestationHandshake>,
+        queue_depth: usize,
+    ) -> Self {
+        let depth = queue_depth.max(1);
+        let (tx, _) = broadcast::channel(depth);
+        Self {
+            log,
+            broadcast: tx,
+            registry,
+            attestation,
+            queue_depth: depth,
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl proto::transport_server::Transport for GrpcTransportService {
+    async fn append(
+        &self,
+        request: Request<proto::AppendRequest>,
+    ) -> Result<Response<proto::AppendResponse>, Status> {
+        let req = request.into_inner();
+        let handshake = handshake_from_proto(req.handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+        verify_with_expected(&self.attestation, handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+
+        let env = envelope_from_proto(
+            req.envelope
+                .ok_or_else(|| Status::invalid_argument("missing envelope"))?,
+        )
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        self.log
+            .append(env.clone(), &self.registry)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        publish_event(&self.broadcast, self.queue_depth, env)
+            .map_err(|err| Status::failed_precondition(err.to_string()))?;
+        Ok(Response::new(proto::AppendResponse {}))
+    }
+
+    type ReadStream = tokio_stream::wrappers::ReceiverStream<Result<proto::Envelope, Status>>;
+
+    async fn read(
+        &self,
+        request: Request<proto::ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        let req = request.into_inner();
+        let handshake = handshake_from_proto(req.handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+        verify_with_expected(&self.attestation, handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+        let items = self.log.read(req.offset as usize, req.limit as usize);
+        let (tx, rx) = tokio::sync::mpsc::channel(items.len().max(1));
+        for env in items {
+            let proto_env = envelope_to_proto(&env)
+                .map_err(|e| Status::internal(format!("encode envelope: {e}")))?;
+            if tx.send(Ok(proto_env)).await.is_err() {
+                break;
+            }
+        }
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
+    }
+
+    type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<proto::Envelope, Status>>;
+
+    async fn subscribe(
+        &self,
+        request: Request<proto::SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let handshake = handshake_from_proto(request.into_inner().handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+        verify_with_expected(&self.attestation, handshake)
+            .map_err(|e| Status::permission_denied(e.to_string()))?;
+
+        let rx = self.broadcast.subscribe();
+        let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+            Ok(env) => match envelope_to_proto(&env) {
+                Ok(proto) => Some(Ok(proto)),
+                Err(err) => Some(Err(Status::internal(err.to_string()))),
+            },
+            Err(err) => Some(Err(Status::internal(err.to_string()))),
+        });
+        let (tx, rx) = tokio::sync::mpsc::channel(self.queue_depth);
+        tokio::spawn(async move {
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
+    }
+}
+
+/// Spawn a gRPC server bound to the provided endpoint (host:port).
+pub async fn spawn_quic_grpc_server(
+    endpoint: String,
+    registry: ChannelRegistry,
+    attestation: Option<AttestationHandshake>,
+) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr)> {
+    let listener = tokio::net::TcpListener::bind(&endpoint).await?;
+    let addr = listener.local_addr()?;
+    let service = GrpcTransportService::new(
+        default_persistent_log("quic-grpc-server")?,
+        registry,
+        attestation,
+        DEFAULT_QUEUE_DEPTH,
+    );
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let handle = tokio::spawn(async move {
+        if let Err(err) = Server::builder()
+            .add_service(proto::transport_server::TransportServer::new(service))
+            .serve_with_incoming(incoming)
+            .await
+        {
+            warn!("gRPC server error: {err:?}");
+        }
+    });
+    Ok((handle, addr))
+}
+
+/// QUIC/gRPC client adapter that mirrors queue semantics while enforcing attestation.
+#[derive(Clone)]
+pub struct QuicGrpcAdapter {
+    client: proto::transport_client::TransportClient<tonic::transport::Channel>,
+    attestation: Option<AttestationHandshake>,
+    queue_depth: usize,
+}
+
+impl std::fmt::Debug for QuicGrpcAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicGrpcAdapter")
+            .field("queue_depth", &self.queue_depth)
+            .finish()
+    }
 }
 
 impl QuicGrpcAdapter {
     /// Establish the adapter after validating attestation.
-    pub fn connect(
+    pub async fn connect(
         endpoint: String,
-        registry: ChannelRegistry,
         attestation: Option<AttestationHandshake>,
-    ) -> TransportResult<Self> {
-        let log = default_persistent_log("quic-grpc")?;
-        Self::connect_with_log(endpoint, registry, attestation, log, DEFAULT_QUEUE_DEPTH)
-    }
-
-    /// Establish the adapter with a custom log and queue depth.
-    pub fn connect_with_log(
-        endpoint: String,
-        registry: ChannelRegistry,
-        attestation: Option<AttestationHandshake>,
-        log: Arc<dyn AppendLogStorage>,
-        queue_depth: usize,
     ) -> TransportResult<Self> {
         if let Some(handshake) = &attestation {
             handshake.verify()?;
         }
-        let depth = queue_depth.max(1);
-        let (tx, _) = broadcast::channel(depth);
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))?
+            .connect()
+            .await?;
         Ok(Self {
-            log,
-            broadcast: tx,
-            registry,
-            endpoint,
-            _attestation: attestation,
-            queue_depth: depth,
+            client: proto::transport_client::TransportClient::new(channel),
+            attestation,
+            queue_depth: DEFAULT_QUEUE_DEPTH,
         })
     }
 
-    /// Endpoint accessor for observability hooks.
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
+    fn handshake(&self) -> Option<proto::Handshake> {
+        handshake_to_proto(&self.attestation)
     }
 }
 
 #[async_trait]
 impl Transport for QuicGrpcAdapter {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
-        self.log
-            .append(env.clone(), &self.registry)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        publish_event(&self.broadcast, self.queue_depth, env)
+        let req = proto::AppendRequest {
+            envelope: Some(envelope_to_proto(&env)?),
+            handshake: self.handshake(),
+        };
+        self.client
+            .clone()
+            .append(Request::new(req))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(())
     }
 
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
-        Ok(self.log.read(offset, limit))
+        let req = proto::ReadRequest {
+            offset: offset as u64,
+            limit: limit as u64,
+            handshake: self.handshake(),
+        };
+        let mut stream = self
+            .client
+            .clone()
+            .read(Request::new(req))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+            .into_inner();
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            let env = envelope_from_proto(item.map_err(|e| anyhow::anyhow!(e.to_string()))?)?;
+            out.push(env);
+        }
+        Ok(out)
     }
 
     async fn subscribe(&self) -> TransportResult<Receiver<Envelope>> {
-        Ok(self.broadcast.subscribe())
+        let req = proto::SubscribeRequest {
+            handshake: self.handshake(),
+        };
+        let mut stream = self
+            .client
+            .clone()
+            .subscribe(Request::new(req))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+            .into_inner();
+        let (tx, rx) = broadcast::channel(self.queue_depth);
+        let depth = self.queue_depth;
+        tokio::spawn(async move {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(env) => match envelope_from_proto(env) {
+                        Ok(env) => {
+                            if tx.len() < depth {
+                                let _ = tx.send(env);
+                            }
+                        }
+                        Err(err) => {
+                            warn!("gRPC subscribe envelope decode error: {err:?}");
+                            break;
+                        }
+                    },
+                    Err(err) => {
+                        warn!("gRPC subscribe stream error: {err:?}");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(rx)
     }
 }
 
@@ -932,7 +1350,7 @@ pub async fn bind_transport(
         }
         AdapterKind::QuicGrpc { endpoint, .. } => {
             let att = cfg.selected.attestation;
-            let adapter = QuicGrpcAdapter::connect(endpoint, registry, att)?;
+            let adapter = QuicGrpcAdapter::connect(endpoint, att).await?;
             Ok(Arc::new(adapter))
         }
         AdapterKind::Mailbox {
@@ -969,6 +1387,7 @@ mod tests {
     use ledger_spec::envelope_hash;
     use rand_core::OsRng;
     use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
 
     fn sample_env(sk: &SigningKey, ts: u64, prev: Option<ledger_spec::Hash>) -> Envelope {
         let body = ledger_spec::EnvelopeBody {
@@ -990,6 +1409,22 @@ mod tests {
         };
         signing::sign_envelope(&mut env, sk);
         env
+    }
+
+    fn runtime_attestation(runtime_id: &str) -> ledger_spec::Attestation {
+        let statement = ledger_spec::AttestationKind::Runtime {
+            runtime_id: runtime_id.into(),
+            policy_hash: [0xCD; 32],
+        };
+        let mut att = ledger_spec::Attestation {
+            issuer: [0u8; 32],
+            statement: statement.clone(),
+            statement_hash: hash_attestation_statement(&statement),
+            signature: [0u8; 64],
+        };
+        let sk = SigningKey::generate(&mut OsRng);
+        ledger_core::signing::sign_attestation(&mut att, &sk);
+        att
     }
 
     #[tokio::test]
@@ -1105,5 +1540,92 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("buffer full"));
+    }
+
+    #[tokio::test]
+    async fn quic_grpc_append_read_roundtrip() {
+        let registry = ChannelRegistry::new();
+        let att = runtime_attestation("runtime-a");
+        let server_handshake = Some(AttestationHandshake {
+            nonce: "server-n".into(),
+            expected_runtime_id: Some("runtime-a".into()),
+            expected_statement_hash: Some(att.statement_hash),
+            presented: None,
+        });
+        let (handle, addr) =
+            spawn_quic_grpc_server("127.0.0.1:0".into(), registry.clone(), server_handshake)
+                .await
+                .unwrap();
+
+        // Give the server a moment to start.
+        sleep(Duration::from_millis(50)).await;
+
+        let client_handshake = Some(AttestationHandshake {
+            nonce: "client-n".into(),
+            expected_runtime_id: Some("runtime-a".into()),
+            expected_statement_hash: Some(att.statement_hash),
+            presented: Some(att.clone()),
+        });
+
+        let adapter = QuicGrpcAdapter::connect(format!("{}", addr), client_handshake)
+            .await
+            .unwrap();
+
+        let sk = SigningKey::generate(&mut OsRng);
+        let env = sample_env(&sk, 10, None);
+        adapter.append(env.clone()).await.unwrap();
+
+        let mut rx = adapter.subscribe().await.unwrap();
+        let items = adapter.read(0, 10).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].header.timestamp, 10);
+
+        // Ensure subscribe yields the append as well.
+        adapter
+            .append(sample_env(&sk, 20, Some(envelope_hash(&env))))
+            .await
+            .unwrap();
+        let evt = rx.recv().await.unwrap();
+        assert_eq!(evt.header.timestamp, 20);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn quic_grpc_attestation_rejects_mismatch() {
+        let registry = ChannelRegistry::new();
+        let expected_att = runtime_attestation("runtime-expected");
+        let server_handshake = Some(AttestationHandshake {
+            nonce: "server-n".into(),
+            expected_runtime_id: Some("runtime-expected".into()),
+            expected_statement_hash: Some(expected_att.statement_hash),
+            presented: None,
+        });
+        let (handle, addr) =
+            spawn_quic_grpc_server("127.0.0.1:0".into(), registry.clone(), server_handshake)
+                .await
+                .unwrap();
+        sleep(Duration::from_millis(50)).await;
+
+        let wrong_att = runtime_attestation("runtime-wrong");
+        let client_handshake = Some(AttestationHandshake {
+            nonce: "client-n".into(),
+            expected_runtime_id: Some("runtime-wrong".into()),
+            expected_statement_hash: Some(wrong_att.statement_hash),
+            presented: Some(wrong_att),
+        });
+
+        let adapter = QuicGrpcAdapter::connect(format!("{}", addr), client_handshake)
+            .await
+            .unwrap();
+        let sk = SigningKey::generate(&mut OsRng);
+        let env = sample_env(&sk, 1, None);
+        let err = adapter.append(env).await.unwrap_err();
+        assert!(
+            err.to_string().contains("permission") || err.to_string().contains("denied"),
+            "unexpected error: {err}"
+        );
+
+        handle.abort();
     }
 }
