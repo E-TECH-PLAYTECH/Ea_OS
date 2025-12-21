@@ -3,8 +3,9 @@
 #![deny(missing_docs)]
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use ledger_core::AppendLog;
+use ledger_core::{AppendLogStorage, PersistentAppendLog};
 use ledger_spec::{hash_attestation_statement, ChannelRegistry, Envelope};
 
 /// Transport error.
@@ -31,6 +32,32 @@ pub trait Transport: Send + Sync {
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>>;
     /// Subscribe to new envelopes (broadcast).
     async fn subscribe(&self) -> TransportResult<Receiver<Envelope>>;
+}
+
+const DEFAULT_QUEUE_DEPTH: usize = 1024;
+
+fn temp_log_dir(label: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    path.push(format!("ledger-transport-{label}-{nanos}"));
+    path
+}
+
+fn default_persistent_log(label: &str) -> TransportResult<Arc<dyn AppendLogStorage>> {
+    let dir = temp_log_dir(label);
+    let log = PersistentAppendLog::open(dir)?;
+    Ok(Arc::new(log))
+}
+
+fn publish_event(tx: &Sender<Envelope>, queue_depth: usize, env: Envelope) -> TransportResult<()> {
+    if tx.len() >= queue_depth {
+        anyhow::bail!("backpressure: subscriber queue is full");
+    }
+    tx.send(env)?;
+    Ok(())
 }
 
 /// Logical domain that publishes capability advertisements.
@@ -160,39 +187,48 @@ impl CapabilityAdvertisement {
 #[derive(Debug, Clone)]
 pub struct InVmQueue {
     /// Append-only log.
-    pub log: AppendLog,
+    pub log: Arc<dyn AppendLogStorage>,
     registry: ChannelRegistry,
     tx: Sender<Envelope>,
+    queue_depth: usize,
 }
 
 impl InVmQueue {
     /// Create new queue.
-    pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(1024);
-        Self {
-            log: AppendLog::new(),
-            registry: ChannelRegistry::new(),
-            tx,
-        }
+    pub fn new() -> TransportResult<Self> {
+        Self::with_registry(ChannelRegistry::new())
     }
 
     /// Create a queue with explicit channel registry (policy enforcement).
-    pub fn with_registry(registry: ChannelRegistry) -> Self {
-        let (tx, _) = broadcast::channel(1024);
-        Self {
-            log: AppendLog::new(),
+    pub fn with_registry(registry: ChannelRegistry) -> TransportResult<Self> {
+        let log = default_persistent_log("invm")?;
+        Self::with_log(log, registry, DEFAULT_QUEUE_DEPTH)
+    }
+
+    /// Create a queue backed by a provided log implementation.
+    pub fn with_log(
+        log: Arc<dyn AppendLogStorage>,
+        registry: ChannelRegistry,
+        queue_depth: usize,
+    ) -> TransportResult<Self> {
+        let depth = queue_depth.max(1);
+        let (tx, _) = broadcast::channel(depth);
+        Ok(Self {
+            log,
             registry,
             tx,
-        }
+            queue_depth: depth,
+        })
     }
 }
 
 #[async_trait]
 impl Transport for InVmQueue {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
-        self.log.append(env.clone(), &self.registry)?;
-        let _ = self.tx.send(env);
-        Ok(())
+        self.log
+            .append(env.clone(), &self.registry)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        publish_event(&self.tx, self.queue_depth, env)
     }
 
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
@@ -221,7 +257,7 @@ impl Loopback {
             handshake.verify()?;
         }
         Ok(Self {
-            queue: InVmQueue::with_registry(registry),
+            queue: InVmQueue::with_registry(registry)?,
             _attestation: attestation,
         })
     }
@@ -284,9 +320,10 @@ async fn read_frame(stream: &mut UnixStream) -> TransportResult<Vec<u8>> {
 /// Unix socket IPC transport (server-side).
 pub struct UnixIpc {
     listener: UnixListener,
-    log: AppendLog,
+    log: Arc<dyn AppendLogStorage>,
     broadcast: Sender<Envelope>,
     registry: ledger_spec::ChannelRegistry,
+    queue_depth: usize,
 }
 
 impl UnixIpc {
@@ -295,23 +332,41 @@ impl UnixIpc {
         path: P,
         registry: ledger_spec::ChannelRegistry,
     ) -> TransportResult<Self> {
+        Self::bind_with_log(
+            path,
+            registry,
+            default_persistent_log("unix-ipc")?,
+            DEFAULT_QUEUE_DEPTH,
+        )
+    }
+
+    /// Bind a Unix socket transport with a provided log.
+    pub async fn bind_with_log<P: AsRef<Path>>(
+        path: P,
+        registry: ledger_spec::ChannelRegistry,
+        log: Arc<dyn AppendLogStorage>,
+        queue_depth: usize,
+    ) -> TransportResult<Self> {
         if let Some(p) = path.as_ref().to_str() {
             let _ = std::fs::remove_file(p);
         }
         let listener = UnixListener::bind(path)?;
-        let (tx, _) = broadcast::channel(1024);
+        let depth = queue_depth.max(1);
+        let (tx, _) = broadcast::channel(depth);
         Ok(Self {
             listener,
-            log: AppendLog::new(),
+            log,
             broadcast: tx,
             registry,
+            queue_depth: depth,
         })
     }
 
     async fn append_env(&self, env: Envelope) -> TransportResult<()> {
-        self.log.append(env.clone(), &self.registry)?;
-        let _ = self.broadcast.send(env);
-        Ok(())
+        self.log
+            .append(env.clone(), &self.registry)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        publish_event(&self.broadcast, self.queue_depth, env)
     }
 
     /// Start accepting connections.
@@ -530,11 +585,12 @@ impl EnclaveProxyStub {
 /// QUIC/gRPC adapter that mirrors queue semantics while enforcing attestation.
 #[derive(Debug, Clone)]
 pub struct QuicGrpcAdapter {
-    log: AppendLog,
+    log: Arc<dyn AppendLogStorage>,
     broadcast: Sender<Envelope>,
     registry: ChannelRegistry,
     endpoint: String,
     _attestation: Option<AttestationHandshake>,
+    queue_depth: usize,
 }
 
 impl QuicGrpcAdapter {
@@ -544,16 +600,30 @@ impl QuicGrpcAdapter {
         registry: ChannelRegistry,
         attestation: Option<AttestationHandshake>,
     ) -> TransportResult<Self> {
+        let log = default_persistent_log("quic-grpc")?;
+        Self::connect_with_log(endpoint, registry, attestation, log, DEFAULT_QUEUE_DEPTH)
+    }
+
+    /// Establish the adapter with a custom log and queue depth.
+    pub fn connect_with_log(
+        endpoint: String,
+        registry: ChannelRegistry,
+        attestation: Option<AttestationHandshake>,
+        log: Arc<dyn AppendLogStorage>,
+        queue_depth: usize,
+    ) -> TransportResult<Self> {
         if let Some(handshake) = &attestation {
             handshake.verify()?;
         }
-        let (tx, _) = broadcast::channel(1024);
+        let depth = queue_depth.max(1);
+        let (tx, _) = broadcast::channel(depth);
         Ok(Self {
-            log: AppendLog::new(),
+            log,
             broadcast: tx,
             registry,
             endpoint,
             _attestation: attestation,
+            queue_depth: depth,
         })
     }
 
@@ -566,9 +636,10 @@ impl QuicGrpcAdapter {
 #[async_trait]
 impl Transport for QuicGrpcAdapter {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
-        self.log.append(env.clone(), &self.registry)?;
-        let _ = self.broadcast.send(env);
-        Ok(())
+        self.log
+            .append(env.clone(), &self.registry)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        publish_event(&self.broadcast, self.queue_depth, env)
     }
 
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
@@ -586,11 +657,12 @@ pub struct MailboxTransport {
     _mailbox: String,
     slot_bytes: usize,
     slots: usize,
-    log: AppendLog,
+    log: Arc<dyn AppendLogStorage>,
     broadcast: Sender<Envelope>,
     registry: ChannelRegistry,
     buffer: Arc<Mutex<VecDeque<Envelope>>>,
     _attestation: Option<AttestationHandshake>,
+    queue_depth: usize,
 }
 
 impl MailboxTransport {
@@ -602,19 +674,43 @@ impl MailboxTransport {
         registry: ChannelRegistry,
         attestation: Option<AttestationHandshake>,
     ) -> TransportResult<Self> {
+        let log = default_persistent_log("mailbox")?;
+        Self::with_log(
+            mailbox,
+            slot_bytes,
+            slots,
+            registry,
+            attestation,
+            log,
+            DEFAULT_QUEUE_DEPTH,
+        )
+    }
+
+    /// Create a mailbox adapter with an explicit log and queue depth.
+    pub fn with_log(
+        mailbox: String,
+        slot_bytes: usize,
+        slots: usize,
+        registry: ChannelRegistry,
+        attestation: Option<AttestationHandshake>,
+        log: Arc<dyn AppendLogStorage>,
+        queue_depth: usize,
+    ) -> TransportResult<Self> {
         if let Some(handshake) = &attestation {
             handshake.verify()?;
         }
-        let (tx, _) = broadcast::channel(1024);
+        let depth = queue_depth.max(1);
+        let (tx, _) = broadcast::channel(depth);
         Ok(Self {
             _mailbox: mailbox,
             slot_bytes,
             slots,
-            log: AppendLog::new(),
+            log,
             broadcast: tx,
             registry,
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(slots))),
             _attestation: attestation,
+            queue_depth: depth,
         })
     }
 
@@ -635,16 +731,17 @@ impl MailboxTransport {
 impl Transport for MailboxTransport {
     async fn append(&self, env: Envelope) -> TransportResult<()> {
         self.enforce_mailbox_limits(&env)?;
-        self.log.append(env.clone(), &self.registry)?;
+        self.log
+            .append(env.clone(), &self.registry)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         {
             let mut buf = self.buffer.lock().await;
             if buf.len() == self.slots {
-                buf.pop_front();
+                anyhow::bail!("mailbox buffer full");
             }
             buf.push_back(env.clone());
         }
-        let _ = self.broadcast.send(env);
-        Ok(())
+        publish_event(&self.broadcast, self.queue_depth, env)
     }
 
     async fn read(&self, offset: usize, limit: usize) -> TransportResult<Vec<Envelope>> {
@@ -868,9 +965,10 @@ pub async fn bind_transport(
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use ledger_core::signing;
+    use ledger_core::{signing, AppendLog};
     use ledger_spec::envelope_hash;
     use rand_core::OsRng;
+    use std::sync::Arc;
 
     fn sample_env(sk: &SigningKey, ts: u64, prev: Option<ledger_spec::Hash>) -> Envelope {
         let body = ledger_spec::EnvelopeBody {
@@ -897,7 +995,7 @@ mod tests {
     #[tokio::test]
     async fn in_vm_queue_roundtrip() {
         let sk = SigningKey::generate(&mut OsRng);
-        let queue = InVmQueue::new();
+        let queue = InVmQueue::new().unwrap();
         let env = sample_env(&sk, 1, None);
         let prev_hash = envelope_hash(&env);
         queue.append(env.clone()).await.unwrap();
@@ -977,5 +1075,35 @@ mod tests {
         let roundtrip = CapabilityAdvertisement::try_from(spec_cap).unwrap();
         assert_eq!(roundtrip.domain, cap.domain);
         assert_eq!(roundtrip.adapters.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn in_vm_queue_backpressure() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let log = Arc::new(AppendLog::new());
+        let queue = InVmQueue::with_log(log, ChannelRegistry::new(), 1).unwrap();
+        let first = sample_env(&sk, 1, None);
+        queue.append(first.clone()).await.unwrap();
+        let err = queue
+            .append(sample_env(&sk, 2, Some(envelope_hash(&first))))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("backpressure"));
+    }
+
+    #[tokio::test]
+    async fn mailbox_overflow_errors() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let log = Arc::new(AppendLog::new());
+        let mailbox =
+            MailboxTransport::with_log("mb0".into(), 4096, 1, ChannelRegistry::new(), None, log, 4)
+                .unwrap();
+        let first = sample_env(&sk, 1, None);
+        mailbox.append(first.clone()).await.unwrap();
+        let err = mailbox
+            .append(sample_env(&sk, 2, Some(envelope_hash(&first))))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("buffer full"));
     }
 }
