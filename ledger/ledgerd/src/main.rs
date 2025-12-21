@@ -1,8 +1,12 @@
 //! `ledgerd` CLI/daemon for append/read/subscribe with policy filters and audit checkpoints.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ledger_core::{AppendLog, CheckpointWriter};
-use ledger_transport::{InVmQueue, Transport};
+use ledger_spec::{ChannelRegistry, ChannelSpec};
+use ledger_transport::{
+    bind_transport, AdapterCapability, AdapterKind, CapabilityAdvertisement, Transport,
+    TransportConfig, TransportDomain,
+};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -13,6 +17,17 @@ struct Cli {
     /// Increase output verbosity.
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+    /// Transport configuration flags.
+    #[command(flatten)]
+    transport: TransportCli,
+    /// Channel registry definition.
+    #[arg(
+        long,
+        env = "LEDGER_REGISTRY",
+        value_name = "FILE",
+        help = "Path to a JSON-encoded ChannelSpec list"
+    )]
+    registry: Option<String>,
     /// Subcommand.
     #[command(subcommand)]
     command: Commands,
@@ -44,6 +59,29 @@ enum Commands {
     },
 }
 
+/// Transport selection flags.
+#[derive(Args, Debug, Clone)]
+struct TransportCli {
+    /// Transport kind.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = TransportKind::Loopback,
+        env = "LEDGER_TRANSPORT"
+    )]
+    transport: TransportKind,
+    /// Unix socket path for IPC transport.
+    #[arg(long, env = "LEDGER_UNIX_PATH")]
+    unix_path: Option<String>,
+}
+
+/// Supported transports exposed via CLI.
+#[derive(ValueEnum, Clone, Debug)]
+enum TransportKind {
+    Loopback,
+    Unix,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -55,32 +93,52 @@ async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    let registry = load_registry(cli.registry.as_deref()).await?;
+    let transport_config = build_transport_config(&cli.transport)?;
+
     match cli.command {
-        Commands::Daemon { checkpoint } => daemon(checkpoint).await?,
-        Commands::Append { file } => append_from_file(file).await?,
-        Commands::Read { offset, limit } => read_entries(offset, limit).await?,
+        Commands::Daemon { checkpoint } => {
+            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
+            daemon(checkpoint, transport, registry).await?
+        }
+        Commands::Append { file } => {
+            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
+            append_from_file(file, transport).await?
+        }
+        Commands::Read { offset, limit } => {
+            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
+            read_entries(offset, limit, transport).await?
+        }
     }
     Ok(())
 }
 
-async fn daemon(checkpoint_interval: usize) -> anyhow::Result<()> {
-    let queue = InVmQueue::new();
+async fn daemon(
+    checkpoint_interval: usize,
+    transport: std::sync::Arc<dyn Transport>,
+    registry: ChannelRegistry,
+) -> anyhow::Result<()> {
     let mut writer = CheckpointWriter::new();
-    let mut rx = queue.subscribe().await?;
+    let mut rx = transport.subscribe().await?;
+    let log = AppendLog::new();
     info!("ledgerd daemon started");
     loop {
         let env = rx.recv().await?;
+        log.append(env.clone(), &registry)?;
         info!(
             "received envelope channel={} ts={}",
             env.header.channel, env.header.timestamp
         );
-        if let Some(cp) = writer.maybe_checkpoint(&queue.log, checkpoint_interval) {
+        if let Some(cp) = writer.maybe_checkpoint(&log, checkpoint_interval) {
             info!("checkpoint length={} root={:x?}", cp.length, cp.root);
         }
     }
 }
 
-async fn append_from_file(path: String) -> anyhow::Result<()> {
+async fn append_from_file(
+    path: String,
+    transport: std::sync::Arc<dyn Transport>,
+) -> anyhow::Result<()> {
     let data = tokio::fs::read(&path).await?;
     let mut env: ledger_spec::Envelope = serde_json::from_slice(&data)?;
     // For demo, auto-sign with ephemeral key if no signatures.
@@ -88,15 +146,17 @@ async fn append_from_file(path: String) -> anyhow::Result<()> {
         let sk = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
         ledger_core::signing::sign_envelope(&mut env, &sk);
     }
-    let queue = InVmQueue::new();
-    queue.append(env.clone()).await?;
+    transport.append(env.clone()).await?;
     info!("appended envelope ts={}", env.header.timestamp);
     Ok(())
 }
 
-async fn read_entries(offset: usize, limit: usize) -> anyhow::Result<()> {
-    let queue = InVmQueue::new();
-    let items = queue.read(offset, limit).await?;
+async fn read_entries(
+    offset: usize,
+    limit: usize,
+    transport: std::sync::Arc<dyn Transport>,
+) -> anyhow::Result<()> {
+    let items = transport.read(offset, limit).await?;
     for env in items {
         println!(
             "channel={} ts={} payload={}",
@@ -104,4 +164,45 @@ async fn read_entries(offset: usize, limit: usize) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+async fn load_registry(path: Option<&str>) -> anyhow::Result<ChannelRegistry> {
+    if let Some(p) = path {
+        let data = tokio::fs::read(p).await?;
+        let specs: Vec<ChannelSpec> = serde_json::from_slice(&data)?;
+        let mut registry = ChannelRegistry::new();
+        for spec in specs {
+            registry.upsert(spec);
+        }
+        Ok(registry)
+    } else {
+        Ok(ChannelRegistry::new())
+    }
+}
+
+fn build_transport_config(cli: &TransportCli) -> anyhow::Result<TransportConfig> {
+    match cli.transport {
+        TransportKind::Loopback => Ok(TransportConfig::loopback(TransportDomain::Ledger)),
+        TransportKind::Unix => {
+            let path = cli
+                .unix_path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--unix-path is required for unix transport"))?;
+            let selected = AdapterCapability {
+                adapter: AdapterKind::UnixIpc { path: path.clone() },
+                features: vec![],
+                attestation: None,
+            };
+            let advertisement = CapabilityAdvertisement {
+                domain: TransportDomain::Ledger,
+                supported_versions: vec!["1.0.x".into()],
+                max_message_bytes: 1_048_576,
+                adapters: vec![selected.clone()],
+            };
+            Ok(TransportConfig {
+                advertisement,
+                selected,
+            })
+        }
+    }
 }

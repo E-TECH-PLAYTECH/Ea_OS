@@ -255,13 +255,13 @@ impl MuscleLifecycleManager {
             self.store.put_with_digest(digest, blob.clone());
         }
 
-        let attestation_hash =
-            match self.find_valid_attestation(&source.attestations, measurement) {
-                Ok(hash) => hash,
-                Err(reason) => {
-                    return vec![self.error_event(muscle, LifecycleStage::Sealed, reason, source)]
-                }
-            };
+        let attestation_hash = match self.find_valid_attestation(&source.attestations, measurement)
+        {
+            Ok(hash) => hash,
+            Err(reason) => {
+                return vec![self.error_event(muscle, LifecycleStage::Sealed, reason, source)]
+            }
+        };
 
         let Some(record) = self.registry.get_mut(&key) else {
             return vec![self.error_event(

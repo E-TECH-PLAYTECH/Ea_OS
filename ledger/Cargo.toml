@@ -25,9 +25,15 @@ blake3 = { version = "1.5", default-features = false, features = ["traits"] }
 [dev-dependencies]
 criterion = { version = "0.5" }
 proptest = { version = "1.0" }
+assert_cmd = "2.0"
+serde_json = "1.0"
+tempfile = "3.10"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+ledger-spec = { path = "spec" }
 
 [[bench]]
 name = "lattice_benchmarks"
+path = "benches/benchmarks.rs"
 harness = false
 
 [profile.release]

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "ledger",
     "ledger/spec",
     "ledger/core",
     "ledger/transport",

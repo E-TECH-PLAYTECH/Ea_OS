@@ -150,10 +150,7 @@ impl Ledger {
         if len == 0 {
             return None;
         }
-        self.log
-            .read(len - 1, 1)
-            .first()
-            .map(envelope_hash)
+        self.log.read(len - 1, 1).first().map(envelope_hash)
     }
 
     /// Append an envelope, enforce invariants, and return a receipt.
@@ -232,9 +229,9 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope_hash;
     use ed25519_dalek::{Signer, SigningKey};
     use rand_core::OsRng;
-    use crate::envelope_hash;
 
     fn registry_with(pk: [u8; 32]) -> ChannelRegistry {
         let mut reg = ChannelRegistry::new();
