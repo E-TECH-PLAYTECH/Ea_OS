@@ -59,6 +59,10 @@ pub trait AppendLogStorage: Send + Sync {
     fn merkle_root(&self) -> Option<[u8; 32]>;
     /// Produce a Merkle receipt for a specific log entry.
     fn receipt_for(&self, index: usize) -> Option<MerkleReceipt>;
+    /// Optional storage usage hint (in bytes) for health reporting.
+    fn storage_usage_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// In-memory append-only log with hash chaining and Merkle checkpoints.
@@ -106,13 +110,43 @@ impl AppendLog {
         env: Envelope,
         registry: &ChannelRegistry,
     ) -> Result<usize, AppendError> {
-        self.validate_and_append(env, registry)
+        let span = tracing::info_span!(
+            "append_log",
+            channel = %env.header.channel,
+            offset = tracing::field::Empty,
+            latency_ms = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        let start = std::time::Instant::now();
+        let res = self.validate_and_append(env, registry);
+        let elapsed = start.elapsed().as_millis() as u64;
+        span.record("latency_ms", &elapsed);
+        match &res {
+            Ok(idx) => {
+                span.record("offset", &(*idx as u64));
+                tracing::debug!("append committed");
+            }
+            Err(err) => tracing::error!(error = %err, "append failed"),
+        }
+        res
     }
 
     /// Read a slice of envelopes.
     pub fn read(&self, offset: usize, limit: usize) -> Vec<Envelope> {
+        let span = tracing::info_span!(
+            "read_log",
+            offset = offset as u64,
+            limit = limit as u64,
+            latency_ms = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        let start = std::time::Instant::now();
         let entries = self.entries.read();
-        entries.iter().skip(offset).take(limit).cloned().collect()
+        let out: Vec<_> = entries.iter().skip(offset).take(limit).cloned().collect();
+        let elapsed = start.elapsed().as_millis() as u64;
+        span.record("latency_ms", &elapsed);
+        tracing::debug!(result_len = out.len(), "read completed");
+        out
     }
 
     /// Return the length.
@@ -168,6 +202,10 @@ impl AppendLogStorage for AppendLog {
 
     fn receipt_for(&self, index: usize) -> Option<MerkleReceipt> {
         AppendLog::receipt_for(self, index)
+    }
+
+    fn storage_usage_bytes(&self) -> Option<u64> {
+        Some(0)
     }
 }
 
@@ -340,6 +378,14 @@ impl AppendLogStorage for PersistentAppendLog {
         mut env: Envelope,
         registry: &ChannelRegistry,
     ) -> Result<usize, AppendError> {
+        let span = tracing::info_span!(
+            "append_persistent_log",
+            channel = %env.header.channel,
+            offset = tracing::field::Empty,
+            latency_ms = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        let start = std::time::Instant::now();
         let mut state = self.state.write();
         let prev_hash = state.entries.last().map(envelope_hash);
         if env.header.prev.is_none() {
@@ -363,18 +409,34 @@ impl AppendLogStorage for PersistentAppendLog {
         if meta.length % self.segment_size == 0 {
             self.compact_segments()?;
         }
+        let elapsed = start.elapsed().as_millis() as u64;
+        span.record("offset", &(index as u64));
+        span.record("latency_ms", &elapsed);
+        tracing::debug!("append committed to wal");
         Ok(index)
     }
 
     fn read(&self, offset: usize, limit: usize) -> Vec<Envelope> {
+        let span = tracing::info_span!(
+            "read_persistent_log",
+            offset = offset as u64,
+            limit = limit as u64,
+            latency_ms = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        let start = std::time::Instant::now();
         let state = self.state.read();
-        state
+        let out = state
             .entries
             .iter()
             .skip(offset)
             .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        let elapsed = start.elapsed().as_millis() as u64;
+        span.record("latency_ms", &elapsed);
+        tracing::debug!(result_len = out.len(), "read completed");
+        out
     }
 
     fn len(&self) -> usize {
@@ -393,6 +455,19 @@ impl AppendLogStorage for PersistentAppendLog {
         }
         let leaves: Vec<[u8; 32]> = state.entries.iter().map(envelope_hash).collect();
         MerkleReceipt::from_leaves(&leaves, index)
+    }
+
+    fn storage_usage_bytes(&self) -> Option<u64> {
+        let wal = std::fs::metadata(&self.wal_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let seg = std::fs::metadata(&self.dir.join("segments.bin"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let meta = std::fs::metadata(&self.meta_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Some(wal + seg + meta)
     }
 }
 
