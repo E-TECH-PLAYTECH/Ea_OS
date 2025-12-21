@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package ledger.transport;
+
+message EnvelopeBody {
+  string payload_json = 1;
+  string payload_type = 2;
+}
+
+message EnvelopeHeader {
+  string channel = 1;
+  uint32 version = 2;
+  bytes prev = 3;
+  bytes body_hash = 4;
+  uint64 timestamp = 5;
+}
+
+message Signature {
+  bytes signer = 1;
+  bytes signature = 2;
+}
+
+message AttestationBuild {
+  bytes artifact_hash = 1;
+  string builder = 2;
+}
+
+message AttestationRuntime {
+  string runtime_id = 1;
+  bytes policy_hash = 2;
+}
+
+message AttestationPolicy {
+  bytes bundle_hash = 1;
+  uint64 expires_at = 2;
+}
+
+message AttestationCustom {
+  string label = 1;
+  bytes payload_hash = 2;
+}
+
+message AttestationKind {
+  oneof kind {
+    AttestationBuild build = 1;
+    AttestationRuntime runtime = 2;
+    AttestationPolicy policy = 3;
+    AttestationCustom custom = 4;
+  }
+}
+
+message Attestation {
+  bytes issuer = 1;
+  AttestationKind statement = 2;
+  bytes statement_hash = 3;
+  bytes signature = 4;
+}
+
+message Envelope {
+  EnvelopeHeader header = 1;
+  EnvelopeBody body = 2;
+  repeated Signature signatures = 3;
+  repeated Attestation attestations = 4;
+}
+
+message Handshake {
+  string nonce = 1;
+  string expected_runtime_id = 2;
+  bytes expected_statement_hash = 3;
+  Attestation presented = 4;
+}
+
+message AppendRequest {
+  Envelope envelope = 1;
+  Handshake handshake = 2;
+}
+
+message AppendResponse {}
+
+message ReadRequest {
+  uint64 offset = 1;
+  uint64 limit = 2;
+  Handshake handshake = 3;
+}
+
+message SubscribeRequest {
+  Handshake handshake = 1;
+}
+
+service Transport {
+  rpc Append(AppendRequest) returns (AppendResponse);
+  rpc Read(ReadRequest) returns (stream Envelope);
+  rpc Subscribe(SubscribeRequest) returns (stream Envelope);
+}

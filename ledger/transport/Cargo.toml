@@ -2,6 +2,7 @@
 name = "ledger-transport"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -17,3 +18,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
+tonic = { version = "0.11", features = ["transport"] }
+prost = "0.12"
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.11"
