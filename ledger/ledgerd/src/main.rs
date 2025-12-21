@@ -27,7 +27,7 @@ struct Cli {
         value_name = "FILE",
         help = "Path to a JSON-encoded ChannelSpec list"
     )]
-    registry: Option<String>,
+    registry: String,
     /// Subcommand.
     #[command(subcommand)]
     command: Commands,
@@ -66,13 +66,27 @@ struct TransportCli {
     #[arg(
         long,
         value_enum,
-        default_value_t = TransportKind::Loopback,
+        default_value_t = TransportKind::Unix,
         env = "LEDGER_TRANSPORT"
     )]
     transport: TransportKind,
     /// Unix socket path for IPC transport.
-    #[arg(long, env = "LEDGER_UNIX_PATH")]
-    unix_path: Option<String>,
+    #[arg(
+        long,
+        env = "LEDGER_UNIX_PATH",
+        default_value = "/tmp/ledgerd.sock",
+        value_name = "PATH",
+        help = "Filesystem path for the Unix domain socket transport"
+    )]
+    unix_path: String,
+    /// QUIC/gRPC endpoint for remote daemon transport.
+    #[arg(
+        long,
+        env = "LEDGER_QUIC_ENDPOINT",
+        value_name = "ENDPOINT",
+        help = "Authority/endpoint for QUIC transport (e.g. https://ledgerd.example.com)"
+    )]
+    quic_endpoint: Option<String>,
 }
 
 /// Supported transports exposed via CLI.
@@ -80,6 +94,7 @@ struct TransportCli {
 enum TransportKind {
     Loopback,
     Unix,
+    Quic,
 }
 
 #[tokio::main]
@@ -93,22 +108,14 @@ async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let registry = load_registry(cli.registry.as_deref()).await?;
+    let registry = load_registry(&cli.registry).await?;
     let transport_config = build_transport_config(&cli.transport)?;
+    let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
 
     match cli.command {
-        Commands::Daemon { checkpoint } => {
-            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
-            daemon(checkpoint, transport, registry).await?
-        }
-        Commands::Append { file } => {
-            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
-            append_from_file(file, transport).await?
-        }
-        Commands::Read { offset, limit } => {
-            let transport = bind_transport(registry.clone(), transport_config.clone()).await?;
-            read_entries(offset, limit, transport).await?
-        }
+        Commands::Daemon { checkpoint } => daemon(checkpoint, transport, registry).await?,
+        Commands::Append { file } => append_from_file(file, transport).await?,
+        Commands::Read { offset, limit } => read_entries(offset, limit, transport).await?,
     }
     Ok(())
 }
@@ -166,30 +173,47 @@ async fn read_entries(
     Ok(())
 }
 
-async fn load_registry(path: Option<&str>) -> anyhow::Result<ChannelRegistry> {
-    if let Some(p) = path {
-        let data = tokio::fs::read(p).await?;
-        let specs: Vec<ChannelSpec> = serde_json::from_slice(&data)?;
-        let mut registry = ChannelRegistry::new();
-        for spec in specs {
-            registry.upsert(spec);
-        }
-        Ok(registry)
-    } else {
-        Ok(ChannelRegistry::new())
+async fn load_registry(path: &str) -> anyhow::Result<ChannelRegistry> {
+    let data = tokio::fs::read(path).await?;
+    let specs: Vec<ChannelSpec> = serde_json::from_slice(&data)?;
+    let mut registry = ChannelRegistry::new();
+    for spec in specs {
+        registry.upsert(spec);
     }
+    Ok(registry)
 }
 
 fn build_transport_config(cli: &TransportCli) -> anyhow::Result<TransportConfig> {
     match cli.transport {
         TransportKind::Loopback => Ok(TransportConfig::loopback(TransportDomain::Ledger)),
         TransportKind::Unix => {
-            let path = cli
-                .unix_path
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--unix-path is required for unix transport"))?;
+            let path = cli.unix_path.clone();
             let selected = AdapterCapability {
                 adapter: AdapterKind::UnixIpc { path: path.clone() },
+                features: vec![],
+                attestation: None,
+            };
+            let advertisement = CapabilityAdvertisement {
+                domain: TransportDomain::Ledger,
+                supported_versions: vec!["1.0.x".into()],
+                max_message_bytes: 1_048_576,
+                adapters: vec![selected.clone()],
+            };
+            Ok(TransportConfig {
+                advertisement,
+                selected,
+            })
+        }
+        TransportKind::Quic => {
+            let endpoint = cli
+                .quic_endpoint
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--quic-endpoint is required for quic transport"))?;
+            let selected = AdapterCapability {
+                adapter: AdapterKind::QuicGrpc {
+                    endpoint: endpoint.clone(),
+                    alpn: None,
+                },
                 features: vec![],
                 attestation: None,
             };
