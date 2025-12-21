@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use ed25519_dalek::{Signer, SigningKey};
-use ledger_core::{envelope_hash, signing, AppendLog, MerkleReceipt, ReplayValidator};
+use ledger_core::{envelope_hash, signing, AppendError, AppendLog, MerkleReceipt, ReplayValidator};
 use ledger_spec::{
     Envelope, EnvelopeBody, EnvelopeHeader, SchemaVersion, Timestamp, ValidationError,
 };
@@ -82,7 +82,9 @@ impl ArdaOrchestrator {
             }
             let batch_len = batch.len();
             for env in batch {
-                let entry = self.append_local(env)?;
+                let entry = self
+                    .append_local(env)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 applied.push(entry);
             }
             offset += batch_len;
@@ -159,7 +161,9 @@ impl ArdaOrchestrator {
             .append(envelope.clone())
             .await
             .context("append via transport failed")?;
-        let entry = self.append_local(envelope)?;
+        let entry = self
+            .append_local(envelope)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         info!("submitted command channel={} idx={}", channel, entry.index);
         Ok(entry)
     }
@@ -175,7 +179,7 @@ impl ArdaOrchestrator {
         self.log.len()
     }
 
-    fn append_local(&self, env: Envelope) -> Result<LedgerViewEntry, ValidationError> {
+    fn append_local(&self, env: Envelope) -> Result<LedgerViewEntry, AppendError> {
         let index = self.log.append_with_index(env.clone(), &self.registry)?;
         let receipt = self
             .log

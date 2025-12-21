@@ -3,10 +3,14 @@
 #![deny(missing_docs)]
 
 use std::collections::VecDeque;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use blake3::Hasher;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use ledger_spec::{
@@ -26,6 +30,37 @@ pub mod policy;
 /// Append-only log identifier.
 pub type LogId = String;
 
+/// Errors emitted by append-only logs (validation + storage).
+#[derive(Debug, thiserror::Error)]
+pub enum AppendError {
+    /// Envelope failed validation.
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+    /// Storage or I/O failure.
+    #[error("storage error: {0}")]
+    Storage(#[from] anyhow::Error),
+}
+
+/// Common log operations shared by in-memory and persistent implementations.
+pub trait AppendLogStorage: Send + Sync {
+    /// Append a validated envelope.
+    fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), AppendError>;
+    /// Append a validated envelope and return its index.
+    fn append_with_index(
+        &self,
+        env: Envelope,
+        registry: &ChannelRegistry,
+    ) -> Result<usize, AppendError>;
+    /// Read a slice of envelopes.
+    fn read(&self, offset: usize, limit: usize) -> Vec<Envelope>;
+    /// Return the length.
+    fn len(&self) -> usize;
+    /// Compute the Merkle root over current entries.
+    fn merkle_root(&self) -> Option<[u8; 32]>;
+    /// Produce a Merkle receipt for a specific log entry.
+    fn receipt_for(&self, index: usize) -> Option<MerkleReceipt>;
+}
+
 /// In-memory append-only log with hash chaining and Merkle checkpoints.
 #[derive(Debug, Default, Clone)]
 pub struct AppendLog {
@@ -41,16 +76,15 @@ impl AppendLog {
     }
 
     /// Append an envelope after validation.
-    pub fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), ValidationError> {
+    pub fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), AppendError> {
         self.append_with_index(env, registry).map(|_| ())
     }
 
-    /// Append an envelope and return its log index once validated.
-    pub fn append_with_index(
+    fn validate_and_append(
         &self,
         mut env: Envelope,
         registry: &ChannelRegistry,
-    ) -> Result<usize, ValidationError> {
+    ) -> Result<usize, AppendError> {
         let mut entries = self.entries.write();
         let prev_hash = entries.last().map(envelope_hash);
         if env.header.prev.is_none() {
@@ -64,6 +98,15 @@ impl AppendLog {
         let index = entries.len();
         entries.push(env);
         Ok(index)
+    }
+
+    /// Append an envelope and return its log index once validated.
+    pub fn append_with_index(
+        &self,
+        env: Envelope,
+        registry: &ChannelRegistry,
+    ) -> Result<usize, AppendError> {
+        self.validate_and_append(env, registry)
     }
 
     /// Read a slice of envelopes.
@@ -98,6 +141,298 @@ impl AppendLog {
     }
 }
 
+impl AppendLogStorage for AppendLog {
+    fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), AppendError> {
+        AppendLog::append(self, env, registry)
+    }
+
+    fn append_with_index(
+        &self,
+        env: Envelope,
+        registry: &ChannelRegistry,
+    ) -> Result<usize, AppendError> {
+        AppendLog::append_with_index(self, env, registry)
+    }
+
+    fn read(&self, offset: usize, limit: usize) -> Vec<Envelope> {
+        AppendLog::read(self, offset, limit)
+    }
+
+    fn len(&self) -> usize {
+        AppendLog::len(self)
+    }
+
+    fn merkle_root(&self) -> Option<[u8; 32]> {
+        AppendLog::merkle_root(self)
+    }
+
+    fn receipt_for(&self, index: usize) -> Option<MerkleReceipt> {
+        AppendLog::receipt_for(self, index)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistentMetadata {
+    length: usize,
+    root: Option<[u8; 32]>,
+}
+
+#[derive(Debug)]
+struct PersistentState {
+    entries: Vec<Envelope>,
+    wal_entries: usize,
+}
+
+/// Disk-backed append log with checksummed WAL and segment compaction.
+#[derive(Debug, Clone)]
+pub struct PersistentAppendLog {
+    state: Arc<RwLock<PersistentState>>,
+    wal: Arc<Mutex<File>>,
+    segments: Arc<Mutex<File>>,
+    dir: PathBuf,
+    meta_path: PathBuf,
+    wal_path: PathBuf,
+    segment_size: usize,
+}
+
+const DEFAULT_SEGMENT_SIZE: usize = 1024;
+const CHECKSUM_DOMAIN: &[u8] = b"ea-ledger:wal:v1";
+
+impl PersistentAppendLog {
+    /// Open (or create) a persistent log at `dir` with the default segment size.
+    pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self, AppendError> {
+        Self::open_with_segment_size(dir, DEFAULT_SEGMENT_SIZE)
+    }
+
+    /// Open (or create) a persistent log at `dir` with a custom segment size.
+    pub fn open_with_segment_size<P: AsRef<Path>>(
+        dir: P,
+        segment_size: usize,
+    ) -> Result<Self, AppendError> {
+        let dir = dir.as_ref();
+        let segment_size = segment_size.max(1);
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create log directory {}", dir.display()))?;
+        let wal_path = dir.join("append.wal");
+        let segments_path = dir.join("segments.bin");
+        let meta_path = dir.join("meta.json");
+        let wal_entries = read_records(&wal_path)?;
+        let mut entries = read_records(&segments_path)?;
+        let wal_count = wal_entries.len();
+        entries.extend(wal_entries);
+
+        let wal = Arc::new(Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&wal_path)
+                .with_context(|| format!("failed to open WAL {}", wal_path.display()))?,
+        ));
+        let segments = Arc::new(Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&segments_path)
+                .with_context(|| format!("failed to open segments {}", segments_path.display()))?,
+        ));
+        let log = Self {
+            state: Arc::new(RwLock::new(PersistentState {
+                entries,
+                wal_entries: wal_count,
+            })),
+            wal,
+            segments,
+            dir: dir.to_path_buf(),
+            meta_path,
+            wal_path,
+            segment_size,
+        };
+        log.ensure_metadata()?;
+        Ok(log)
+    }
+
+    fn ensure_metadata(&self) -> Result<(), AppendError> {
+        let state = self.state.read();
+        let expected = PersistentMetadata {
+            length: state.entries.len(),
+            root: merkle_root_for(&state.entries),
+        };
+        let on_disk = fs::read(&self.meta_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistentMetadata>(&bytes).ok());
+        if on_disk.as_ref() != Some(&expected) {
+            self.persist_metadata(&expected)?;
+        }
+        Ok(())
+    }
+
+    fn persist_metadata(&self, meta: &PersistentMetadata) -> Result<(), AppendError> {
+        let tmp = self.meta_path.with_extension("tmp");
+        let encoded =
+            serde_json::to_vec(meta).context("failed to serialize persistent log metadata")?;
+        fs::write(&tmp, encoded)
+            .with_context(|| format!("failed to write metadata {}", tmp.display()))?;
+        fs::rename(&tmp, &self.meta_path).with_context(|| {
+            format!(
+                "failed to atomically persist metadata {} -> {}",
+                tmp.display(),
+                self.meta_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    fn write_wal(&self, env: &Envelope) -> Result<(), AppendError> {
+        let mut wal = self.wal.lock();
+        let bytes = bincode::serialize(env).context("failed to serialize envelope")?;
+        let mut hasher = Hasher::new();
+        hasher.update(CHECKSUM_DOMAIN);
+        hasher.update(&bytes);
+        let digest = hasher.finalize();
+        let len = (bytes.len() as u32).to_be_bytes();
+        wal.write_all(&len)
+            .context("failed to write wal length prefix")?;
+        wal.write_all(digest.as_bytes())
+            .context("failed to write wal checksum")?;
+        wal.write_all(&bytes)
+            .context("failed to write wal entry body")?;
+        wal.flush().context("failed to flush wal")?;
+        wal.sync_all().context("failed to sync wal to disk")?;
+        Ok(())
+    }
+
+    fn compact_segments(&self) -> Result<(), AppendError> {
+        let wal_bytes = fs::read(&self.wal_path).unwrap_or_default();
+        if wal_bytes.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut segments = self.segments.lock();
+            segments
+                .write_all(&wal_bytes)
+                .context("failed to write compacted wal into segments")?;
+            segments
+                .sync_all()
+                .context("failed to sync compacted segments")?;
+        }
+        {
+            let mut wal = self.wal.lock();
+            wal.set_len(0).context("failed to truncate wal")?;
+            wal.seek(SeekFrom::End(0))
+                .context("failed to reset wal cursor")?;
+            wal.sync_all().context("failed to sync truncated wal")?;
+        }
+        let mut state = self.state.write();
+        state.wal_entries = 0;
+        Ok(())
+    }
+}
+
+impl AppendLogStorage for PersistentAppendLog {
+    fn append(&self, env: Envelope, registry: &ChannelRegistry) -> Result<(), AppendError> {
+        self.append_with_index(env, registry).map(|_| ())
+    }
+
+    fn append_with_index(
+        &self,
+        mut env: Envelope,
+        registry: &ChannelRegistry,
+    ) -> Result<usize, AppendError> {
+        let mut state = self.state.write();
+        let prev_hash = state.entries.last().map(envelope_hash);
+        if env.header.prev.is_none() {
+            env.header.prev = prev_hash;
+        }
+        let prev_state = ChannelState {
+            last_hash: prev_hash,
+            last_timestamp: state.entries.last().map(|e| e.header.timestamp),
+        };
+        let _ = ledger_spec::validate_envelope(&env, registry, &prev_state)?;
+        let index = state.entries.len();
+        self.write_wal(&env)?;
+        state.entries.push(env);
+        state.wal_entries += 1;
+        let meta = PersistentMetadata {
+            length: state.entries.len(),
+            root: merkle_root_for(&state.entries),
+        };
+        drop(state);
+        self.persist_metadata(&meta)?;
+        if meta.length % self.segment_size == 0 {
+            self.compact_segments()?;
+        }
+        Ok(index)
+    }
+
+    fn read(&self, offset: usize, limit: usize) -> Vec<Envelope> {
+        let state = self.state.read();
+        state
+            .entries
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn len(&self) -> usize {
+        self.state.read().entries.len()
+    }
+
+    fn merkle_root(&self) -> Option<[u8; 32]> {
+        let state = self.state.read();
+        merkle_root_for(&state.entries)
+    }
+
+    fn receipt_for(&self, index: usize) -> Option<MerkleReceipt> {
+        let state = self.state.read();
+        if index >= state.entries.len() {
+            return None;
+        }
+        let leaves: Vec<[u8; 32]> = state.entries.iter().map(envelope_hash).collect();
+        MerkleReceipt::from_leaves(&leaves, index)
+    }
+}
+
+fn read_records(path: &Path) -> Result<Vec<Envelope>, AppendError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .with_context(|| format!("failed to read log file {}", path.display()))?;
+    let mut cursor = 0usize;
+    let mut items = Vec::new();
+    while cursor < buf.len() {
+        if cursor + 4 > buf.len() {
+            anyhow::bail!("truncated record length in {}", path.display());
+        }
+        let len = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if cursor + 32 + len > buf.len() {
+            anyhow::bail!("truncated record body in {}", path.display());
+        }
+        let checksum: [u8; 32] = buf[cursor..cursor + 32].try_into().unwrap();
+        cursor += 32;
+        let payload = &buf[cursor..cursor + len];
+        cursor += len;
+        let mut hasher = Hasher::new();
+        hasher.update(CHECKSUM_DOMAIN);
+        hasher.update(payload);
+        let digest = hasher.finalize();
+        if digest.as_bytes() != checksum {
+            anyhow::bail!("checksum mismatch in {}", path.display());
+        }
+        let env: Envelope =
+            bincode::deserialize(payload).context("failed to decode envelope from wal")?;
+        items.push(env);
+    }
+    Ok(items)
+}
 /// Checkpoint record capturing merkle root and length.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -206,6 +541,14 @@ impl MerkleSegmenter {
 
 fn compute_merkle(items: &[[u8; 32]]) -> [u8; 32] {
     compute_merkle_root(items).unwrap_or([0u8; 32])
+}
+
+fn merkle_root_for(entries: &[Envelope]) -> Option<[u8; 32]> {
+    if entries.is_empty() {
+        return None;
+    }
+    let leaves: Vec<[u8; 32]> = entries.iter().map(envelope_hash).collect();
+    compute_merkle_root(&leaves)
 }
 
 fn merkle_parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -339,6 +682,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use ledger_spec::{EnvelopeBody, EnvelopeHeader};
     use rand_core::OsRng;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_env(prev: Option<[u8; 32]>, ts: u64, sk: &SigningKey) -> Envelope {
         let body = EnvelopeBody {
@@ -438,5 +782,60 @@ mod tests {
         let receipt = log.receipt_for(2).expect("receipt exists");
         assert!(receipt.verify());
         assert_eq!(receipt.index, 2);
+    }
+
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("ledger-core-{prefix}-{nanos}"));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn persistent_log_recovers_merkle_root() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let reg = registry(&sk);
+        let dir = temp_dir("recover");
+        let log = PersistentAppendLog::open(&dir).expect("create persistent log");
+        let mut prev = None;
+        for ts in 1..=3 {
+            let env = sample_env(prev, ts, &sk);
+            prev = Some(envelope_hash(&env));
+            log.append(env, &reg).expect("append to persistent log");
+        }
+        let expected_root = log.merkle_root().expect("root exists");
+        let expected_len = log.len();
+        drop(log);
+        let recovered = PersistentAppendLog::open(&dir).expect("reopen persistent log");
+        assert_eq!(recovered.len(), expected_len);
+        assert_eq!(recovered.merkle_root().unwrap(), expected_root);
+        assert!(recovered.receipt_for(1).unwrap().verify());
+    }
+
+    #[test]
+    fn persistent_log_compacts_segments() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let reg = registry(&sk);
+        let dir = temp_dir("compact");
+        let log = PersistentAppendLog::open_with_segment_size(&dir, 2).unwrap();
+        let mut prev = None;
+        for ts in 1..=4 {
+            let env = sample_env(prev, ts, &sk);
+            prev = Some(envelope_hash(&env));
+            log.append(env, &reg).unwrap();
+        }
+        // Wal should have compacted after hitting the segment size twice.
+        let wal_path = dir.join("append.wal");
+        let wal_bytes = std::fs::read(&wal_path).unwrap_or_default();
+        assert!(
+            wal_bytes.is_empty(),
+            "wal should be empty after compaction, got {} bytes",
+            wal_bytes.len()
+        );
+        assert_eq!(log.len(), 4);
     }
 }
