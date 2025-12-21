@@ -209,7 +209,7 @@ impl AppendLogStorage for AppendLog {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct PersistentMetadata {
     length: usize,
     root: Option<[u8; 32]>,
@@ -219,6 +219,15 @@ struct PersistentMetadata {
 struct PersistentState {
     entries: Vec<Envelope>,
     wal_entries: usize,
+}
+
+impl PersistentMetadata {
+    fn from_state(state: &PersistentState) -> Self {
+        Self {
+            length: state.entries.len(),
+            root: merkle_root_for(&state.entries),
+        }
+    }
 }
 
 /// Disk-backed append log with checksummed WAL and segment compaction.
@@ -235,6 +244,12 @@ pub struct PersistentAppendLog {
 
 const DEFAULT_SEGMENT_SIZE: usize = 1024;
 const CHECKSUM_DOMAIN: &[u8] = b"ea-ledger:wal:v1";
+
+fn read_metadata_file(path: &Path) -> Option<PersistentMetadata> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PersistentMetadata>(&bytes).ok())
+}
 
 impl PersistentAppendLog {
     /// Open (or create) a persistent log at `dir` with the default segment size.
@@ -258,6 +273,15 @@ impl PersistentAppendLog {
         let mut entries = read_records(&segments_path)?;
         let wal_count = wal_entries.len();
         entries.extend(wal_entries);
+        let current_meta = PersistentMetadata {
+            length: entries.len(),
+            root: merkle_root_for(&entries),
+        };
+        if let Some(on_disk) = read_metadata_file(&meta_path) {
+            if on_disk != current_meta {
+                anyhow::bail!("persistent log metadata mismatch during recovery");
+            }
+        }
 
         let wal = Arc::new(Mutex::new(
             OpenOptions::new()
@@ -293,17 +317,11 @@ impl PersistentAppendLog {
 
     fn ensure_metadata(&self) -> Result<(), AppendError> {
         let state = self.state.read();
-        let expected = PersistentMetadata {
-            length: state.entries.len(),
-            root: merkle_root_for(&state.entries),
-        };
-        let on_disk = fs::read(&self.meta_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PersistentMetadata>(&bytes).ok());
-        if on_disk.as_ref() != Some(&expected) {
-            self.persist_metadata(&expected)?;
+        let expected = PersistentMetadata::from_state(&state);
+        match read_metadata_file(&self.meta_path) {
+            Some(on_disk) if on_disk == expected => Ok(()),
+            _ => self.persist_metadata(&expected),
         }
-        Ok(())
     }
 
     fn persist_metadata(&self, meta: &PersistentMetadata) -> Result<(), AppendError> {
@@ -365,6 +383,10 @@ impl PersistentAppendLog {
         let mut state = self.state.write();
         state.wal_entries = 0;
         Ok(())
+    }
+
+    fn metadata(&self) -> Option<PersistentMetadata> {
+        read_metadata_file(&self.meta_path)
     }
 }
 
@@ -912,5 +934,48 @@ mod tests {
             wal_bytes.len()
         );
         assert_eq!(log.len(), 4);
+    }
+
+    #[test]
+    fn persistent_log_persists_metadata_across_restart() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let reg = registry(&sk);
+        let dir = temp_dir("meta");
+        let log = PersistentAppendLog::open_with_segment_size(&dir, 2).unwrap();
+        let mut prev = None;
+        for ts in 1..=3 {
+            let env = sample_env(prev, ts, &sk);
+            prev = Some(envelope_hash(&env));
+            log.append(env, &reg).unwrap();
+        }
+        let meta = log.metadata().expect("metadata persisted");
+        assert_eq!(meta.length, log.len());
+        assert_eq!(meta.root, log.merkle_root());
+        drop(log);
+
+        let reopened = PersistentAppendLog::open_with_segment_size(&dir, 2).unwrap();
+        let idx = reopened
+            .append_with_index(sample_env(prev, 4, &sk), &reg)
+            .unwrap();
+        assert_eq!(idx, meta.length);
+        let reopened_meta = reopened.metadata().unwrap();
+        assert_eq!(reopened_meta.length, reopened.len());
+        assert_eq!(reopened_meta.root, reopened.merkle_root());
+    }
+
+    #[test]
+    fn persistent_log_rejects_corrupt_metadata() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let reg = registry(&sk);
+        let dir = temp_dir("meta-mismatch");
+        let log = PersistentAppendLog::open(&dir).unwrap();
+        log.append(sample_env(None, 1, &sk), &reg).unwrap();
+        let meta_path = dir.join("meta.json");
+        let mut meta: PersistentMetadata =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta.length += 1;
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let err = PersistentAppendLog::open(&dir).unwrap_err();
+        assert!(err.to_string().contains("metadata mismatch"));
     }
 }

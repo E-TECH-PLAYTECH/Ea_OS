@@ -779,7 +779,7 @@ impl Transport for UnixIpcClient {
             anyhow::bail!("unexpected subscribe response: {resp:?}");
         }
 
-        let (tx, rx) = broadcast::channel(1024);
+        let (tx, rx) = broadcast::channel(DEFAULT_QUEUE_DEPTH);
         let mut stream = stream;
         tokio::spawn(async move {
             loop {
@@ -934,14 +934,27 @@ pub async fn spawn_quic_grpc_server(
     registry: ChannelRegistry,
     attestation: Option<AttestationHandshake>,
 ) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr)> {
-    let listener = tokio::net::TcpListener::bind(&endpoint).await?;
-    let addr = listener.local_addr()?;
-    let service = GrpcTransportService::new(
-        default_persistent_log("quic-grpc-server")?,
+    spawn_quic_grpc_server_with_log(
+        endpoint,
         registry,
         attestation,
+        default_persistent_log("quic-grpc-server")?,
         DEFAULT_QUEUE_DEPTH,
-    );
+    )
+    .await
+}
+
+/// Spawn a gRPC server with an explicit log and queue depth.
+pub async fn spawn_quic_grpc_server_with_log(
+    endpoint: String,
+    registry: ChannelRegistry,
+    attestation: Option<AttestationHandshake>,
+    log: Arc<dyn AppendLogStorage>,
+    queue_depth: usize,
+) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr)> {
+    let listener = tokio::net::TcpListener::bind(&endpoint).await?;
+    let addr = listener.local_addr()?;
+    let service = GrpcTransportService::new(log, registry, attestation, queue_depth);
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
     let handle = tokio::spawn(async move {
         if let Err(err) = Server::builder()
@@ -977,6 +990,15 @@ impl QuicGrpcAdapter {
         endpoint: String,
         attestation: Option<AttestationHandshake>,
     ) -> TransportResult<Self> {
+        Self::connect_with_queue_depth(endpoint, attestation, DEFAULT_QUEUE_DEPTH).await
+    }
+
+    /// Establish the adapter with an explicit queue depth for subscription buffering.
+    pub async fn connect_with_queue_depth(
+        endpoint: String,
+        attestation: Option<AttestationHandshake>,
+        queue_depth: usize,
+    ) -> TransportResult<Self> {
         if let Some(handshake) = &attestation {
             handshake.verify()?;
         }
@@ -986,7 +1008,7 @@ impl QuicGrpcAdapter {
         Ok(Self {
             client: proto::transport_client::TransportClient::new(channel),
             attestation,
-            queue_depth: DEFAULT_QUEUE_DEPTH,
+            queue_depth: queue_depth.max(1),
         })
     }
 
@@ -1049,8 +1071,9 @@ impl Transport for QuicGrpcAdapter {
                 match msg {
                     Ok(env) => match envelope_from_proto(env) {
                         Ok(env) => {
-                            if tx.len() < depth {
-                                let _ = tx.send(env);
+                            if let Err(err) = publish_event(&tx, depth, env) {
+                                warn!("gRPC subscribe backpressure: {err:?}");
+                                break;
                             }
                         }
                         Err(err) => {
@@ -1588,6 +1611,38 @@ mod tests {
         let evt = rx.recv().await.unwrap();
         assert_eq!(evt.header.timestamp, 20);
 
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn quic_grpc_backpressure_on_slow_subscriber() {
+        let registry = ChannelRegistry::new();
+        let (handle, addr) = spawn_quic_grpc_server_with_log(
+            "127.0.0.1:0".into(),
+            registry.clone(),
+            None,
+            default_persistent_log("quic-backpressure").unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+
+        let adapter = QuicGrpcAdapter::connect_with_queue_depth(format!("{}", addr), None, 1)
+            .await
+            .unwrap();
+        let mut rx = adapter.subscribe().await.unwrap();
+        let sk = SigningKey::generate(&mut OsRng);
+        let first = sample_env(&sk, 1, None);
+        adapter.append(first.clone()).await.unwrap();
+
+        let err = adapter
+            .append(sample_env(&sk, 2, Some(envelope_hash(&first))))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("backpressure"));
+
+        // Drain to ensure graceful shutdown and avoid warnings.
+        let _ = rx.recv().await;
         handle.abort();
     }
 
