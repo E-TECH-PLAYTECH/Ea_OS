@@ -3,14 +3,18 @@
 #![deny(missing_docs)]
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use futures::TryStreamExt;
+use http;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -18,10 +22,17 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::BroadcastStream;
 use tonic::{transport::Server, Request, Response, Status};
+use tower::service_fn;
 use tracing::{info, warn};
 
 use ledger_core::{AppendLogStorage, PersistentAppendLog};
 use ledger_spec::{hash_attestation_statement, ChannelRegistry, Envelope};
+use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
+use rcgen::generate_simple_self_signed;
+use rustls::{
+    Certificate as RustlsCertificate, ClientConfig as RustlsClientConfig, PrivateKey, RootCertStore,
+};
+use std::pin::Pin;
 
 pub mod proto {
     tonic::include_proto!("ledger.transport");
@@ -288,6 +299,55 @@ fn envelope_from_proto(env: proto::Envelope) -> TransportResult<Envelope> {
     })
 }
 
+/// Wrapper over QUIC bi-streams to satisfy tonic IO requirements.
+pub struct QuicGrpcStream {
+    _connection: quinn::Connection,
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl QuicGrpcStream {
+    fn new(connection: quinn::Connection, send: SendStream, recv: RecvStream) -> Self {
+        Self {
+            _connection: connection,
+            send,
+            recv,
+        }
+    }
+}
+
+impl AsyncRead for QuicGrpcStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.recv).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for QuicGrpcStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.send).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.send).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.send).poll_shutdown(cx)
+    }
+}
+
 fn envelope_to_proto(env: &Envelope) -> TransportResult<proto::Envelope> {
     Ok(proto::Envelope {
         header: Some(proto::EnvelopeHeader {
@@ -372,6 +432,123 @@ fn verify_with_expected(
         anyhow::bail!("attestation required but not provided");
     }
     handshake.verify()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct QuicHandshakeFrame {
+    handshake: proto::Handshake,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum QuicHandshakeResponse {
+    Ok,
+    Error(String),
+}
+
+fn quic_server_config(alpn: Option<String>) -> TransportResult<(ServerConfig, Vec<u8>)> {
+    let cert = generate_simple_self_signed(vec!["localhost".into()])?;
+    let cert_der = cert.serialize_der()?;
+    let key = PrivateKey(cert.serialize_private_key_der());
+    let mut tls_config = rustls::ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(vec![RustlsCertificate(cert_der.clone())], key)?;
+    tls_config.alpn_protocols = vec![alpn.unwrap_or_else(|| "h2".into()).into_bytes()];
+    let mut server_config = ServerConfig::with_crypto(Arc::new(tls_config));
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    server_config.transport = Arc::new(transport_config);
+    Ok((server_config, cert_der))
+}
+
+struct NoServerVerification;
+
+impl rustls::client::danger::ServerCertVerifier for NoServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+}
+
+fn quic_client_config(
+    cert_der: Option<Vec<u8>>,
+    alpn: Option<String>,
+) -> TransportResult<ClientConfig> {
+    let mut tls = RustlsClientConfig::builder().with_safe_defaults();
+    let tls = if let Some(der) = cert_der {
+        let mut roots = RootCertStore::empty();
+        roots.add(RustlsCertificate(der))?;
+        tls.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        let mut cfg = tls
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        cfg.dangerous()
+            .set_certificate_verifier(Arc::new(NoServerVerification));
+        cfg
+    };
+    let mut tls = tls;
+    tls.alpn_protocols = vec![alpn.unwrap_or_else(|| "h2".into()).into_bytes()];
+    Ok(ClientConfig::new(Arc::new(tls)))
+}
+
+fn proto_handshake_or_default(
+    handshake: &Option<AttestationHandshake>,
+) -> TransportResult<proto::Handshake> {
+    Ok(handshake_to_proto(handshake).unwrap_or(proto::Handshake {
+        nonce: String::new(),
+        expected_runtime_id: String::new(),
+        expected_statement_hash: Vec::new(),
+        presented: None,
+    }))
+}
+
+async fn server_verify_quic_handshake(
+    expected: &Option<AttestationHandshake>,
+    mut recv: RecvStream,
+    mut send: SendStream,
+) -> TransportResult<()> {
+    let frame_bytes = read_len_prefixed(&mut recv).await?;
+    let incoming: QuicHandshakeFrame = bincode::deserialize(&frame_bytes)?;
+    let provided = handshake_from_proto(Some(incoming.handshake))?;
+    let verify_res = verify_with_expected(expected, provided);
+    let resp = match &verify_res {
+        Ok(_) => QuicHandshakeResponse::Ok,
+        Err(err) => QuicHandshakeResponse::Error(err.to_string()),
+    };
+    let resp_bytes = bincode::serialize(&resp)?;
+    write_len_prefixed(&mut send, &resp_bytes).await?;
+    let _ = send.finish().await;
+    verify_res
+}
+
+async fn client_send_quic_handshake(
+    connection: &quinn::Connection,
+    handshake: &Option<AttestationHandshake>,
+) -> TransportResult<()> {
+    if let Some(hs) = handshake {
+        hs.verify()?;
+    }
+    let (mut send, mut recv) = connection.open_bi().await?;
+    let frame = QuicHandshakeFrame {
+        handshake: proto_handshake_or_default(handshake)?,
+    };
+    let bytes = bincode::serialize(&frame)?;
+    write_len_prefixed(&mut send, &bytes).await?;
+    let resp_bytes = read_len_prefixed(&mut recv).await?;
+    let resp: QuicHandshakeResponse = bincode::deserialize(&resp_bytes)?;
+    let _ = send.finish().await;
+    match resp {
+        QuicHandshakeResponse::Ok => Ok(()),
+        QuicHandshakeResponse::Error(err) => anyhow::bail!(err),
+    }
 }
 
 /// Adapter capability advertised on the ledger.
@@ -548,6 +725,29 @@ async fn read_frame(stream: &mut UnixStream) -> TransportResult<Vec<u8>> {
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body).await?;
     Ok(body)
+}
+
+async fn read_len_prefixed<R>(reader: &mut R) -> TransportResult<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+async fn write_len_prefixed<W>(writer: &mut W, body: &[u8]) -> TransportResult<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let len = body.len() as u32;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(body).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 /// Unix socket IPC transport (server-side).
@@ -820,7 +1020,7 @@ struct GrpcTransportService {
     log: Arc<dyn AppendLogStorage>,
     broadcast: Sender<Envelope>,
     registry: ChannelRegistry,
-    attestation: Option<AttestationHandshake>,
+    _attestation: Option<AttestationHandshake>,
     queue_depth: usize,
 }
 
@@ -837,7 +1037,7 @@ impl GrpcTransportService {
             log,
             broadcast: tx,
             registry,
-            attestation,
+            _attestation: attestation,
             queue_depth: depth,
         }
     }
@@ -850,11 +1050,6 @@ impl proto::transport_server::Transport for GrpcTransportService {
         request: Request<proto::AppendRequest>,
     ) -> Result<Response<proto::AppendResponse>, Status> {
         let req = request.into_inner();
-        let handshake = handshake_from_proto(req.handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-        verify_with_expected(&self.attestation, handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-
         let env = envelope_from_proto(
             req.envelope
                 .ok_or_else(|| Status::invalid_argument("missing envelope"))?,
@@ -876,10 +1071,6 @@ impl proto::transport_server::Transport for GrpcTransportService {
         request: Request<proto::ReadRequest>,
     ) -> Result<Response<Self::ReadStream>, Status> {
         let req = request.into_inner();
-        let handshake = handshake_from_proto(req.handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-        verify_with_expected(&self.attestation, handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
         let items = self.log.read(req.offset as usize, req.limit as usize);
         let (tx, rx) = tokio::sync::mpsc::channel(items.len().max(1));
         for env in items {
@@ -900,11 +1091,6 @@ impl proto::transport_server::Transport for GrpcTransportService {
         &self,
         request: Request<proto::SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        let handshake = handshake_from_proto(request.into_inner().handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-        verify_with_expected(&self.attestation, handshake)
-            .map_err(|e| Status::permission_denied(e.to_string()))?;
-
         let rx = self.broadcast.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|res| match res {
             Ok(env) => match envelope_to_proto(&env) {
@@ -928,50 +1114,145 @@ impl proto::transport_server::Transport for GrpcTransportService {
     }
 }
 
-/// Spawn a gRPC server bound to the provided endpoint (host:port).
+/// Spawn a gRPC server bound to the provided endpoint (host:port) over QUIC.
 pub async fn spawn_quic_grpc_server(
     endpoint: String,
     registry: ChannelRegistry,
     attestation: Option<AttestationHandshake>,
-) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr)> {
+) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr, Vec<u8>)> {
     spawn_quic_grpc_server_with_log(
         endpoint,
         registry,
         attestation,
         default_persistent_log("quic-grpc-server")?,
         DEFAULT_QUEUE_DEPTH,
+        None,
     )
     .await
 }
 
-/// Spawn a gRPC server with an explicit log and queue depth.
+/// Spawn a gRPC server with an explicit log and queue depth over QUIC.
 pub async fn spawn_quic_grpc_server_with_log(
     endpoint: String,
     registry: ChannelRegistry,
     attestation: Option<AttestationHandshake>,
     log: Arc<dyn AppendLogStorage>,
     queue_depth: usize,
-) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr)> {
-    let listener = tokio::net::TcpListener::bind(&endpoint).await?;
-    let addr = listener.local_addr()?;
-    let service = GrpcTransportService::new(log, registry, attestation, queue_depth);
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    alpn: Option<String>,
+) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr, Vec<u8>)> {
+    let addr: SocketAddr = endpoint.parse()?;
+    let (server_config, cert_der) = quic_server_config(alpn.clone())?;
+    let (endpoint, incoming) = Endpoint::server(server_config, addr)?;
+    let local_addr = endpoint.local_addr()?;
+    let service = GrpcTransportService::new(log, registry, attestation.clone(), queue_depth);
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<QuicGrpcStream, std::io::Error>>(queue_depth);
+    tokio::spawn(async move {
+        tokio::pin!(incoming);
+        while let Some(connecting) = incoming.next().await {
+            match connecting.await {
+                Ok(mut new_conn) => {
+                    let expected = attestation.clone();
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let mut bi_streams = new_conn.bi_streams;
+                        let conn = new_conn.connection;
+                        let handshake_stream = bi_streams.next().await;
+                        let Some(handshake_res) = handshake_stream else {
+                            conn.close(0u32.into(), b"missing handshake");
+                            let _ = tx
+                                .send(Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionAborted,
+                                    "missing handshake stream",
+                                )))
+                                .await;
+                            return;
+                        };
+                        match handshake_res {
+                            Ok((send, recv)) => {
+                                let verify =
+                                    server_verify_quic_handshake(&expected, recv, send).await;
+                                if let Err(err) = verify {
+                                    conn.close(0u32.into(), b"handshake failed");
+                                    let _ = tx
+                                        .send(Err(std::io::Error::new(
+                                            std::io::ErrorKind::PermissionDenied,
+                                            err.to_string(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                conn.close(0u32.into(), b"handshake stream error");
+                                let _ = tx
+                                    .send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionAborted,
+                                        err.to_string(),
+                                    )))
+                                    .await;
+                                return;
+                            }
+                        }
+
+                        let next_stream = bi_streams.next().await;
+                        match next_stream {
+                            Some(Ok((send, recv))) => {
+                                let stream = QuicGrpcStream::new(conn.clone(), send, recv);
+                                let _ = tx.send(Ok(stream)).await;
+                            }
+                            Some(Err(err)) => {
+                                conn.close(0u32.into(), b"stream error");
+                                let _ = tx
+                                    .send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionAborted,
+                                        err.to_string(),
+                                    )))
+                                    .await;
+                            }
+                            None => {
+                                conn.close(0u32.into(), b"missing grpc stream");
+                                let _ = tx
+                                    .send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionAborted,
+                                        "no gRPC stream provided",
+                                    )))
+                                    .await;
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            err.to_string(),
+                        )))
+                        .await;
+                }
+            }
+        }
+    });
+
+    let incoming_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     let handle = tokio::spawn(async move {
         if let Err(err) = Server::builder()
             .add_service(proto::transport_server::TransportServer::new(service))
-            .serve_with_incoming(incoming)
+            .serve_with_incoming(incoming_stream)
             .await
         {
             warn!("gRPC server error: {err:?}");
         }
     });
-    Ok((handle, addr))
+    Ok((handle, local_addr, cert_der))
 }
 
 /// QUIC/gRPC client adapter that mirrors queue semantics while enforcing attestation.
 #[derive(Clone)]
 pub struct QuicGrpcAdapter {
     client: proto::transport_client::TransportClient<tonic::transport::Channel>,
+    endpoint: Endpoint,
+    connection: quinn::Connection,
     attestation: Option<AttestationHandshake>,
     queue_depth: usize,
 }
@@ -979,6 +1260,7 @@ pub struct QuicGrpcAdapter {
 impl std::fmt::Debug for QuicGrpcAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuicGrpcAdapter")
+            .field("endpoint", &self.endpoint.local_addr())
             .field("queue_depth", &self.queue_depth)
             .finish()
     }
@@ -990,7 +1272,7 @@ impl QuicGrpcAdapter {
         endpoint: String,
         attestation: Option<AttestationHandshake>,
     ) -> TransportResult<Self> {
-        Self::connect_with_queue_depth(endpoint, attestation, DEFAULT_QUEUE_DEPTH).await
+        Self::connect_with_queue_depth(endpoint, attestation, DEFAULT_QUEUE_DEPTH, None, None).await
     }
 
     /// Establish the adapter with an explicit queue depth for subscription buffering.
@@ -998,15 +1280,39 @@ impl QuicGrpcAdapter {
         endpoint: String,
         attestation: Option<AttestationHandshake>,
         queue_depth: usize,
+        server_cert: Option<Vec<u8>>,
+        alpn: Option<String>,
     ) -> TransportResult<Self> {
-        if let Some(handshake) = &attestation {
-            handshake.verify()?;
+        let server_addr: SocketAddr = endpoint.parse()?;
+        let client_cfg = quic_client_config(server_cert, alpn.clone())?;
+        let mut endpoint = Endpoint::client("[::]:0".parse()?)?;
+        endpoint.set_default_client_config(client_cfg);
+        let connection = endpoint
+            .connect(server_addr, "localhost")?
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        if let Err(err) = client_send_quic_handshake(&connection, &attestation).await {
+            connection.close(0u32.into(), b"handshake failed");
+            return Err(err);
         }
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{endpoint}"))?
-            .connect()
+
+        let connector = service_fn(move |_: http::Uri| {
+            let conn = connection.clone();
+            async move {
+                let (send, recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e))?;
+                Ok::<_, std::io::Error>(QuicGrpcStream::new(conn.clone(), send, recv))
+            }
+        });
+        let channel = tonic::transport::Endpoint::from_static("http://quic.transport")
+            .connect_with_connector(connector)
             .await?;
         Ok(Self {
             client: proto::transport_client::TransportClient::new(channel),
+            endpoint,
+            connection,
             attestation,
             queue_depth: queue_depth.max(1),
         })
@@ -1371,9 +1677,16 @@ pub async fn bind_transport(
             let loopback = Loopback::new(registry, att)?;
             Ok(Arc::new(loopback))
         }
-        AdapterKind::QuicGrpc { endpoint, .. } => {
+        AdapterKind::QuicGrpc { endpoint, alpn } => {
             let att = cfg.selected.attestation;
-            let adapter = QuicGrpcAdapter::connect(endpoint, att).await?;
+            let adapter = QuicGrpcAdapter::connect_with_queue_depth(
+                endpoint,
+                att,
+                DEFAULT_QUEUE_DEPTH,
+                None,
+                alpn,
+            )
+            .await?;
             Ok(Arc::new(adapter))
         }
         AdapterKind::Mailbox {
@@ -1575,7 +1888,7 @@ mod tests {
             expected_statement_hash: Some(att.statement_hash),
             presented: None,
         });
-        let (handle, addr) =
+        let (handle, addr, cert_der) =
             spawn_quic_grpc_server("127.0.0.1:0".into(), registry.clone(), server_handshake)
                 .await
                 .unwrap();
@@ -1590,9 +1903,15 @@ mod tests {
             presented: Some(att.clone()),
         });
 
-        let adapter = QuicGrpcAdapter::connect(format!("{}", addr), client_handshake)
-            .await
-            .unwrap();
+        let adapter = QuicGrpcAdapter::connect_with_queue_depth(
+            format!("{}", addr),
+            client_handshake,
+            DEFAULT_QUEUE_DEPTH,
+            Some(cert_der.clone()),
+            None,
+        )
+        .await
+        .unwrap();
 
         let sk = SigningKey::generate(&mut OsRng);
         let env = sample_env(&sk, 10, None);
@@ -1617,19 +1936,26 @@ mod tests {
     #[tokio::test]
     async fn quic_grpc_backpressure_on_slow_subscriber() {
         let registry = ChannelRegistry::new();
-        let (handle, addr) = spawn_quic_grpc_server_with_log(
+        let (handle, addr, cert_der) = spawn_quic_grpc_server_with_log(
             "127.0.0.1:0".into(),
             registry.clone(),
             None,
             default_persistent_log("quic-backpressure").unwrap(),
             1,
+            None,
         )
         .await
         .unwrap();
 
-        let adapter = QuicGrpcAdapter::connect_with_queue_depth(format!("{}", addr), None, 1)
-            .await
-            .unwrap();
+        let adapter = QuicGrpcAdapter::connect_with_queue_depth(
+            format!("{}", addr),
+            None,
+            1,
+            Some(cert_der.clone()),
+            None,
+        )
+        .await
+        .unwrap();
         let mut rx = adapter.subscribe().await.unwrap();
         let sk = SigningKey::generate(&mut OsRng);
         let first = sample_env(&sk, 1, None);
@@ -1656,7 +1982,7 @@ mod tests {
             expected_statement_hash: Some(expected_att.statement_hash),
             presented: None,
         });
-        let (handle, addr) =
+        let (handle, addr, cert_der) =
             spawn_quic_grpc_server("127.0.0.1:0".into(), registry.clone(), server_handshake)
                 .await
                 .unwrap();
@@ -1670,16 +1996,15 @@ mod tests {
             presented: Some(wrong_att),
         });
 
-        let adapter = QuicGrpcAdapter::connect(format!("{}", addr), client_handshake)
-            .await
-            .unwrap();
-        let sk = SigningKey::generate(&mut OsRng);
-        let env = sample_env(&sk, 1, None);
-        let err = adapter.append(env).await.unwrap_err();
-        assert!(
-            err.to_string().contains("permission") || err.to_string().contains("denied"),
-            "unexpected error: {err}"
-        );
+        let adapter_res = QuicGrpcAdapter::connect_with_queue_depth(
+            format!("{}", addr),
+            client_handshake,
+            DEFAULT_QUEUE_DEPTH,
+            Some(cert_der.clone()),
+            None,
+        )
+        .await;
+        assert!(adapter_res.is_err(), "handshake should fail");
 
         handle.abort();
     }
