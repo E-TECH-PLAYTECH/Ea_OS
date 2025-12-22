@@ -220,14 +220,14 @@ pub fn square_mod_n(x: &[u8; 32]) -> [u8; 256] {
 
 /// Generate QR membership proof
 pub fn qr_prove_membership(target_root: &[u8; 32]) -> QrProof {
-    use blake3::traits::KeyedRng;
-    
     // Deterministic RNG seeded with target root
-    let mut rng = blake3::KeyedRng::new(b"EA-LATTICE-PROVER-v1", target_root);
+    let key = blake3::derive_key("EA-LATTICE-PROVER-v1", target_root);
+    let mut hasher = Hasher::new_keyed(&key);
+    let mut reader = hasher.finalize_xof();
 
     // Generate random witness
     let mut y = [0u8; 32];
-    rng.fill_bytes(&mut y);
+    reader.fill(&mut y);
 
     // Compute y² mod N
     let y_sq_mod_n = square_mod_n(&y);
@@ -254,10 +254,11 @@ pub fn qr_verify_membership(
     _challenge: &[u8; 32],
     proof: &QrProof,
 ) -> bool {
-    let y = &proof[..32];
+    let mut y = [0u8; 32];
+    y.copy_from_slice(&proof[..32]);
     
     // Recompute y² mod N
-    let computed_sq = square_mod_n(y);
+    let computed_sq = square_mod_n(&y);
 
     // Verify root matches expected value
     let expected_root = {

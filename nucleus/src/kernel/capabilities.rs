@@ -1,5 +1,11 @@
 use crate::NucleusError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Capability {
+    pub key: [u8; 32],
+    pub permissions: u32,
+}
+
 /// Compile-time capability system
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilitySet {

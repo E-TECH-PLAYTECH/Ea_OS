@@ -1,4 +1,5 @@
 use crate::integration::SymbioteInterface;
+use crate::integration::{Heartbeat, SealedBlob};
 
 pub struct TimerRule;
 
@@ -16,10 +17,4 @@ impl TimerRule {
         
         symbiote.seal_heartbeat(heartbeat)
     }
-}
-
-pub struct Heartbeat {
-    pub muscle_id: u64,
-    pub version: u32,
-    pub counter: u64,
 }

@@ -4,6 +4,8 @@
 use uefi::table::boot::{BootServices, MemoryType, AllocateType};
 use blake3::Hasher;
 use crate::crypto::{self, MuscleSalt};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// Parsed muscle blob information
 pub struct LoadedMuscle {
@@ -51,7 +53,7 @@ pub fn load_muscle(
     let memory_ptr = boot_services
         .allocate_pages(
             AllocateType::AnyPages,
-            MemoryType::LoaderCode,
+            MemoryType::LOADER_CODE,
             memory_pages,
         )
         .map_err(|_| LoadError::MemoryAllocationFailed)?;
@@ -67,7 +69,7 @@ pub fn load_muscle(
 
     Ok(LoadedMuscle {
         entry_point: memory_ptr,
-        memory_pages,
+        memory_pages: memory_pages as u64,
         name,
         arch,
     })
@@ -98,7 +100,7 @@ fn parse_blob_header(blob: &[u8]) -> Result<(String, String, &[u8]), &'static st
     }
 
     let name = String::from_utf8(blob[8..8 + name_len].to_vec())
-        .map_err(|_| "invalid muscle name")?;
+        .map_err(|_| "invalid utf8 name")?;
 
     let arch = match arch_code {
         1 => "aarch64",
@@ -120,7 +122,7 @@ fn parse_blob_header(blob: &[u8]) -> Result<(String, String, &[u8]), &'static st
     let computed_hash = hasher.finalize();
     let stored_hash = &blob[payload_end..];
 
-    if computed_hash.as_bytes()[..8] != stored_hash {
+    if computed_hash.as_bytes()[..8] != *stored_hash {
         return Err("integrity check failed");
     }
 
@@ -145,10 +147,9 @@ fn is_architecture_supported(arch: &str) -> bool {
     arch == "aarch64" || arch == "x86_64"
 }
 
-/// Calculate required pages for memory allocation
-fn calculate_required_pages(data_size: usize) -> usize {
-    let page_size = 4096;
-    (data_size + page_size - 1) / page_size
+/// Calculate required pages for muscle
+fn calculate_required_pages(size: usize) -> usize {
+    (size + 4095) / 4096
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce, aead::Aead};
 use blake3::{Hasher, OUT_LEN};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
+use alloc::vec::Vec;
 
 /// Protocol version — must match muscle compiler
 const PROTOCOL_VERSION: &[u8] = b"Ea/muscle/v5.0";
@@ -25,7 +26,7 @@ pub const FIXED_OVERHEAD: usize = KEM_CT_LEN + 8 + 12 + 32;
 pub const MIN_BLOB_SIZE: usize = FIXED_OVERHEAD;
 
 /// Derive key with domain separation (matches muscle compiler)
-fn derive(key_material: &[u8], salt: &MuscleSalt, domain: &[u8; 32]) -> [u8; 32] {
+fn derive(key_material: &[u8; 32], salt: &MuscleSalt, domain: &[u8; 32]) -> [u8; 32] {
     let mut h = Hasher::new_keyed(key_material);
     h.update(PROTOCOL_VERSION);
     h.update(domain);
@@ -53,10 +54,10 @@ pub fn open(
     let version = u64::from_le_bytes(version_bytes.try_into().unwrap());
 
     // In classical mode, shared secret is derived directly from master + salt
-    let shared_secret = derive(master, salt, &DOMAIN_KDF);
+    let mut shared_secret = derive(master, salt, &DOMAIN_KDF);
 
-    let enc_key = derive(&shared_secret, salt, &DOMAIN_KDF);
-    let mac_key = derive(&shared_secret, salt, &DOMAIN_MAC);
+    let mut enc_key = derive(&shared_secret, salt, &DOMAIN_KDF);
+    let mut mac_key = derive(&shared_secret, salt, &DOMAIN_MAC);
 
     // Verify MAC first (constant-time)
     let mut h = Hasher::new_keyed(&mac_key);
@@ -77,9 +78,9 @@ pub fn open(
         .map_err(|_| "decryption failed")?;
 
     // Cleanup
-    zeroize::Zeroize::zeroize(&mut shared_secret.to_vec());
-    zeroize::Zeroize::zeroize(&mut enc_key.to_vec());
-    zeroize::Zeroize::zeroize(&mut mac_key.to_vec());
+    shared_secret.zeroize();
+    enc_key.zeroize();
+    mac_key.zeroize();
 
     Ok((plaintext, version))
 }

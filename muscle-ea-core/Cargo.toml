@@ -10,17 +10,17 @@ keywords = ["biological-computing", "capability-security", "cryptography", "musc
 categories = ["cryptography", "no-std"]
 
 [dependencies]
-rand_core = { version = "0.6", features = ["std"] }
+rand_core = { version = "0.6", default-features = false }
 zeroize = { version = "1.8", features = ["derive"] }
-thiserror = { version = "1.0", default-features = false }
+thiserror = { version = "1.0", default-features = false, optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
-blake3 = "1.5"
+blake3 = { version = "1.5", default-features = false }
 aes-gcm = { version = "0.10", features = ["aes"] }
 
 [features]
 default = ["std"]
-std = ["thiserror/std", "rand_core/std"]
-no-std = ["thiserror?/no-std", "alloc"]
+std = ["thiserror", "rand_core/std"]
+no-std = ["alloc"]
 alloc = []
 
 [package.metadata.docs.rs]

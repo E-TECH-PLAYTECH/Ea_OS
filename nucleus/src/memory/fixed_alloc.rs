@@ -1,12 +1,13 @@
 use crate::NucleusError;
 
 /// Fixed-size allocator for no-std environments
+#[derive(Debug)]
 pub struct FixedAllocator<T, const N: usize> {
     buffer: [Option<T>; N],
     count: usize,
 }
 
-impl<T, const N: usize> FixedAllocator<T, N> {
+impl<T: Copy, const N: usize> FixedAllocator<T, N> {
     pub const fn new() -> Self {
         Self {
             buffer: [None; N],

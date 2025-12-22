@@ -1,0 +1,14 @@
+[package]
+name = "getrandom"
+version = "0.2.16"
+edition = "2021"
+description = "Stub implementation of getrandom for Eä no_std builds"
+license = "MIT OR Apache-2.0"
+authors = ["Eä Foundation <contact@ea.foundation>"]
+publish = false
+
+[features]
+default = ["std"]
+std = []
+custom = []
+js = []

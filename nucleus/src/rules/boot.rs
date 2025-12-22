@@ -7,7 +7,7 @@ impl BootRule {
         Self
     }
     
-    pub fn execute(attestation: &HardwareAttestation, lattice: &LatticeStream) -> bool {
+    pub fn execute(attestation: &mut HardwareAttestation, lattice: &LatticeStream) -> bool {
         // 1. Verify hardware attestation
         if !attestation.verify() {
             return false;

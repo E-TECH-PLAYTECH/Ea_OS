@@ -6,9 +6,22 @@ members = [
     "ledger/transport",
     "ledger/ledgerd",
     "ledger/arda",
-    "ledger/ui-shell"
+    "ledger/ui-shell",
+    "nucleus",
+    "symbiote",
+    "referee",
+    "muscle-compiler",
+    "muscle-ea-core",
+    "muscle-ea-pathfinder",
+    "muscle-ea-neurowasm",
+    "muscle-ea-dendritewasm",
+    "muscle-ea-axonwasm",
+    "muscles/preloader"
 ]
 resolver = "2"
+
+[patch.crates-io]
+getrandom = { path = "patches/getrandom" }
 
 [workspace.dependencies]
 anyhow = "1.0"

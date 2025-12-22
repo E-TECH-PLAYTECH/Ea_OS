@@ -2,7 +2,7 @@
 
 use ea_lattice_ledger::{MuscleUpdate, LatticeRoot};
 use alloc::vec::Vec;
-use core::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 /// Security policy action
 #[derive(Debug, Clone, PartialEq, Eq)]

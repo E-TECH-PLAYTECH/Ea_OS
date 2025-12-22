@@ -1,5 +1,5 @@
 mod boot;
-mod updates;
+pub mod updates; // Make public so we can access HealingAction
 mod timer;
 
 pub use boot::BootRule;
@@ -15,6 +15,7 @@ pub enum RuleId {
 }
 
 /// Fixed-size rule engine
+#[derive(Debug)]
 pub struct RuleEngine {
     current_rule: RuleId,
     rule_flags: u8,

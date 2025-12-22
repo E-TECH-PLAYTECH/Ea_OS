@@ -14,6 +14,7 @@ impl Priority {
 }
 
 /// Fixed-size scheduler with compile-time analysis
+#[derive(Debug)]
 pub struct Scheduler {
     schedule: [Option<usize>; 256], // Muscle slots by priority
     current_slot: u8,

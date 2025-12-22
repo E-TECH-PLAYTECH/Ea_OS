@@ -19,3 +19,16 @@ fn test_capabilities() {
     assert!(caps.can_load_muscle());
     assert!(caps.can_emit_update());
 }
+
+#[test]
+fn test_syscalls() {
+    use nucleus::syscalls::{Syscall, SyscallArgs, SyscallHandler};
+    use nucleus::kernel::MuscleNucleus;
+
+    let mut nucleus = MuscleNucleus::new();
+    let args = SyscallArgs { arg0: 10, arg1: 0, arg2: 0 };
+    
+    // Test MuscAlloc
+    let res = nucleus.handle_syscall(Syscall::MuscAlloc, args);
+    assert!(res.is_ok());
+}

@@ -1,5 +1,7 @@
-use crate::rules::{LatticeUpdate, HealingAction};
+use crate::integration::LatticeUpdate;
+use crate::rules::updates::HealingAction;
 
+#[derive(Debug)]
 pub struct SymbioteInterface {
     version: u32,
     initialized: bool,

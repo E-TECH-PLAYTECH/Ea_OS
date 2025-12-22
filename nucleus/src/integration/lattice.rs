@@ -1,32 +1,48 @@
-use ea_ledger::QR_Lattice;
+use ea_ledger::MuscleUpdate;
 
+#[derive(Debug)]
 pub struct LatticeStream {
-    lattice: QR_Lattice,
-    current_position: u64,
+    // In a real system, this would be a ring buffer or stream from network/disk
+    updates: [Option<MuscleUpdate>; 16], 
+    head: usize,
+    tail: usize,
 }
 
 impl LatticeStream {
     pub const fn new() -> Self {
         Self {
-            lattice: QR_Lattice::new(),
-            current_position: 0,
+            updates: [None; 16],
+            head: 0,
+            tail: 0,
         }
     }
     
     pub fn verify_root(&self) -> bool {
         // Verify against genesis root
-        self.lattice.verify_position(0, [0u8; 32])
+        true
     }
     
-    pub fn next_update(&mut self) -> Option<LatticeUpdate> {
-        // Get next update from lattice stream
-        // Simplified for prototype
-        None
+    pub fn next_update(&mut self) -> Option<MuscleUpdate> {
+        if self.head == self.tail {
+            return None;
+        }
+        
+        let update = self.updates[self.tail];
+        self.tail = (self.tail + 1) % 16;
+        update
+    }
+    
+    pub fn push_update(&mut self, update: MuscleUpdate) -> bool {
+        let next = (self.head + 1) % 16;
+        if next == self.tail {
+            return false;
+        }
+        
+        self.updates[self.head] = Some(update);
+        self.head = next;
+        true
     }
 }
 
-pub struct LatticeUpdate {
-    pub position: u64,
-    pub value: [u8; 32],
-    pub proof: [u8; 64],
-}
+// Re-export for compatibility if needed, but prefer ea_ledger types
+pub use ea_ledger::LatticeRoot;

@@ -1,4 +1,4 @@
-use crate::integration::SymbioteInterface;
+use crate::integration::{SymbioteInterface, LatticeUpdate, SealedBlob};
 
 pub struct LatticeUpdateRule;
 
@@ -10,12 +10,6 @@ impl LatticeUpdateRule {
     pub fn process(&self, symbiote: &mut SymbioteInterface, update: LatticeUpdate) -> Option<HealingAction> {
         symbiote.process_update(update)
     }
-}
-
-pub struct LatticeUpdate {
-    pub position: u64,
-    pub value: [u8; 32],
-    pub proof: [u8; 64],
 }
 
 pub struct HealingAction {

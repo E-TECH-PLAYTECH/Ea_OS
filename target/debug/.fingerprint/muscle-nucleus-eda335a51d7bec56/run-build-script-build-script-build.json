@@ -1,0 +1,1 @@
+{"rustc":8646743770172355007,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[3416073342519605577,"build_script_build",false,8913723258991433038]],"local":[{"RerunIfChanged":{"output":"debug/build/muscle-nucleus-eda335a51d7bec56/output","paths":["build.rs","src/"]}}],"rustflags":[],"config":0,"compile_kind":0}

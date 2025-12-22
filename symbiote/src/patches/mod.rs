@@ -1,11 +1,13 @@
 //! Security patches for vulnerability healing
 
 use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::vec;
 
 /// Security patch trait
 pub trait SecurityPatch {
     /// Patch identifier
-    fn id(&self) -> &[u8; 32];
+    fn id(&self) -> [u8; 32];
     
     /// Patch description
     fn description(&self) -> &str;
@@ -33,9 +35,8 @@ pub enum PatchError {
 pub struct Cve202601Patch;
 
 impl SecurityPatch for Cve202601Patch {
-    fn id(&self) -> &[u8; 32] {
-        static ID: [u8; 32] = *blake3::hash(b"patch_cve_2026_01").as_bytes();
-        &ID
+    fn id(&self) -> [u8; 32] {
+        *blake3::hash(b"patch_cve_2026_01").as_bytes()
     }
 
     fn description(&self) -> &str {
@@ -67,7 +68,7 @@ impl SecurityPatch for Cve202601Patch {
 pub fn get_patch(patch_id: &[u8; 32]) -> Option<&'static dyn SecurityPatch> {
     static CVE_2026_01: Cve202601Patch = Cve202601Patch;
     
-    if patch_id == CVE_2026_01.id() {
+    if *patch_id == CVE_2026_01.id() {
         Some(&CVE_2026_01)
     } else {
         None
