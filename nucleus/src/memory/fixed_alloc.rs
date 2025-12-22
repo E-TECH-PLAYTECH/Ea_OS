@@ -1,5 +1,3 @@
-use crate::NucleusError;
-
 /// Fixed-size allocator for no-std environments
 #[derive(Debug)]
 pub struct FixedAllocator<T, const N: usize> {

@@ -5,7 +5,6 @@ use uefi::table::boot::{BootServices, MemoryType, AllocateType};
 use blake3::Hasher;
 use crate::crypto::{self, MuscleSalt};
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 /// Parsed muscle blob information
 pub struct LoadedMuscle {

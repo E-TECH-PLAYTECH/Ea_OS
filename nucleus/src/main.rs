@@ -29,6 +29,4 @@ pub extern "C" fn _start() -> ! {
     
     // Execute boot rule - this never returns
     nucleus.execute_boot_rule();
-    
-    loop {}
 }

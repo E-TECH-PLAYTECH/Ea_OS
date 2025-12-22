@@ -4,9 +4,6 @@
 //! and compile-time verified rules.
 
 #![no_std]
-#![feature(const_mut_refs)]
-#![feature(const_fn_trait_bound)]
-
 extern crate alloc;
 
 pub mod kernel;

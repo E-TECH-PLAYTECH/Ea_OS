@@ -1,6 +1,6 @@
 //! Policy engine for security decision making
 
-use ea_lattice_ledger::{MuscleUpdate, LatticeRoot};
+use ea_lattice_ledger::MuscleUpdate;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 
@@ -49,8 +49,6 @@ pub struct PolicyEngine {
     policies: Vec<SecurityPolicy>,
     /// Quarantine list (muscle_id -> reason)
     quarantine_list: BTreeMap<[u8; 32], &'static str>,
-    /// Healing attempts tracking
-    healing_attempts: BTreeMap<[u8; 32], u32>,
 }
 
 impl Default for PolicyEngine {
@@ -58,7 +56,6 @@ impl Default for PolicyEngine {
         let mut engine = Self {
             policies: Vec::new(),
             quarantine_list: BTreeMap::new(),
-            healing_attempts: BTreeMap::new(),
         };
         
         // Register default policies

@@ -39,7 +39,6 @@
 extern crate alloc;
 
 use ea_lattice_ledger::{MuscleUpdate, LatticeRoot, verify_update};
-use blake3::Hasher;
 
 mod policy_engine;
 pub use policy_engine::{PolicyEngine, SecurityPolicy, PolicyAction};
@@ -100,9 +99,9 @@ impl Symbiote {
     /// Generate a healing update for a vulnerable muscle
     fn generate_healing_update(
         &self,
-        muscle_id: [u8; 32],
-        vulnerable_version: u64,
-        patch: &dyn patches::SecurityPatch,
+        _muscle_id: [u8; 32],
+        _vulnerable_version: u64,
+        _patch: &dyn patches::SecurityPatch,
     ) -> Option<MuscleUpdate> {
         // In real implementation, this would:
         // 1. Fetch current muscle source via introspection capability

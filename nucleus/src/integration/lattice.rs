@@ -45,4 +45,5 @@ impl LatticeStream {
 }
 
 // Re-export for compatibility if needed, but prefer ea_ledger types
+#[allow(unused_imports)]
 pub use ea_ledger::LatticeRoot;

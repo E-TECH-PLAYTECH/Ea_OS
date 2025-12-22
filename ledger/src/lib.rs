@@ -23,7 +23,6 @@
 extern crate alloc;
 
 use blake3::Hasher;
-use core::mem;
 
 mod consts;
 use consts::{N, N_LIMBS};
@@ -222,7 +221,7 @@ pub fn square_mod_n(x: &[u8; 32]) -> [u8; 256] {
 pub fn qr_prove_membership(target_root: &[u8; 32]) -> QrProof {
     // Deterministic RNG seeded with target root
     let key = blake3::derive_key("EA-LATTICE-PROVER-v1", target_root);
-    let mut hasher = Hasher::new_keyed(&key);
+    let hasher = Hasher::new_keyed(&key);
     let mut reader = hasher.finalize_xof();
 
     // Generate random witness

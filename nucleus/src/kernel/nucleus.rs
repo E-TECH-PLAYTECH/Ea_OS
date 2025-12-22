@@ -1,4 +1,4 @@
-use crate::{KERNEL_SIZE, MAX_MUSCLES, MAX_UPDATES, SCHEDULE_SLOTS, SYMBIOTE_ID, NucleusError, Result};
+use crate::{MAX_MUSCLES, MAX_UPDATES, SYMBIOTE_ID, NucleusError, Result};
 use super::capabilities::CapabilitySet;
 use super::scheduler::{Scheduler, Priority};
 use crate::rules::{RuleEngine, RuleId};
@@ -40,6 +40,7 @@ pub struct MuscleNucleus {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct LoadedMuscle {
     pub id: u64,
     pub entry_point: u64,
@@ -80,12 +81,12 @@ impl MuscleNucleus {
         }
         
         // 3. Load symbiote as highest priority muscle
-        if let Err(e) = self.load_muscle(SYMBIOTE_ID, 0) {
+        if let Err(_) = self.load_muscle(SYMBIOTE_ID, 0) {
             self.panic("Failed to load symbiote");
         }
         
         // 4. Schedule symbiote at highest priority
-        if let Err(e) = self.scheduler.schedule(0, Priority::MAX) {
+        if let Err(_) = self.scheduler.schedule(0, Priority::MAX) {
             self.panic("Failed to schedule symbiote");
         }
         
@@ -200,7 +201,7 @@ impl MuscleNucleus {
         }
     }
 
-    fn panic(&self, reason: &str) -> ! {
+    fn panic(&self, _reason: &str) -> ! {
         // In a real kernel, this would dump state and halt
         // For now, just loop forever
         loop {}

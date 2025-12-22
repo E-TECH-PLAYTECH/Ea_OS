@@ -8,7 +8,6 @@ pub mod page_alloc {
 
     #[derive(Debug)]
     pub struct PageAllocator {
-        start: usize,
         end: usize,
         current: UnsafeCell<usize>,
     }
@@ -16,7 +15,6 @@ pub mod page_alloc {
     impl PageAllocator {
         pub const fn new(start: usize, end: usize) -> Self {
             Self {
-                start,
                 end,
                 current: UnsafeCell::new(start),
             }
