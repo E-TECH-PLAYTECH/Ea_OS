@@ -1,0 +1,8 @@
+# Ignore Cargo build artifacts
+/target/
+**/target/
+
+# Ignore incremental build directories generated during nightly checks
+**/debug/incremental/
+**/debug/.fingerprint/
+

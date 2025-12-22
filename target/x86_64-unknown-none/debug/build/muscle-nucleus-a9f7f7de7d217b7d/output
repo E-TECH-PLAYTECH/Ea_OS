@@ -1,3 +1,0 @@
-cargo:rerun-if-changed=build.rs
-cargo:rerun-if-changed=src/
-cargo:rustc-cfg=kernel_size_verified
