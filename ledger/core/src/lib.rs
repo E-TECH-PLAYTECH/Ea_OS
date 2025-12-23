@@ -13,9 +13,9 @@ use blake3::Hasher;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
+pub use ledger_spec::{envelope_hash, hash_body};
 use ledger_spec::{
-    envelope_hash, hash_body, Attestation, ChannelRegistry, ChannelState, Envelope, Signature,
-    ValidationError,
+    Attestation, ChannelRegistry, ChannelState, Envelope, Signature, ValidationError,
 };
 
 /// Base application orchestrators (audit terminal, privacy analyzer, agency assistant).
@@ -564,6 +564,7 @@ impl CheckpointWriter {
 }
 
 /// Replay validator detects tampering or reordering.
+#[derive(Clone)]
 pub struct ReplayValidator {
     registry: ChannelRegistry,
 }

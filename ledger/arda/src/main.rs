@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         cli.channel.clone()
     };
 
-    let transport: Arc<dyn Transport> = Arc::new(InVmQueue::with_registry(registry.clone()));
+    let transport: Arc<dyn Transport> = Arc::new(InVmQueue::with_registry(registry.clone())?);
     let orchestrator = ArdaOrchestrator::new(
         transport,
         registry,

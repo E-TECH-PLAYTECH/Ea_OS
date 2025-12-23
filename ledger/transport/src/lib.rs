@@ -29,11 +29,12 @@ use ledger_core::{AppendLogStorage, PersistentAppendLog};
 use ledger_spec::{hash_attestation_statement, ChannelRegistry, Envelope};
 use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
 use rcgen::generate_simple_self_signed;
-use rustls::{
-    Certificate as RustlsCertificate, ClientConfig as RustlsClientConfig, PrivateKey, RootCertStore,
-};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName as RustlsServerName};
+use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use std::pin::Pin;
 
+/// Generated protobuf types for ledger transport.
+#[allow(missing_docs)]
 pub mod proto {
     tonic::include_proto!("ledger.transport");
 }
@@ -334,17 +335,40 @@ impl AsyncWrite for QuicGrpcStream {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        Pin::new(&mut this.send).poll_write(cx, buf)
+        Pin::new(&mut this.send)
+            .poll_write(cx, buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        Pin::new(&mut this.send).poll_flush(cx)
+        Pin::new(&mut this.send)
+            .poll_flush(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        Pin::new(&mut this.send).poll_shutdown(cx)
+        Pin::new(&mut this.send)
+            .poll_shutdown(cx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
+/// Connection info for tonic's Connected trait.
+#[derive(Clone, Debug)]
+pub struct QuicConnectInfo {
+    /// Remote address of the QUIC connection.
+    pub remote_addr: Option<std::net::SocketAddr>,
+}
+
+impl tonic::transport::server::Connected for QuicGrpcStream {
+    type ConnectInfo = QuicConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        QuicConnectInfo {
+            remote_addr: self._connection.remote_address().into(),
+        }
     }
 }
 
@@ -434,9 +458,25 @@ fn verify_with_expected(
     handshake.verify()
 }
 
+// Note: proto::Handshake uses prost, so we encode it separately
 #[derive(Debug, Serialize, Deserialize)]
 struct QuicHandshakeFrame {
-    handshake: proto::Handshake,
+    handshake_bytes: Vec<u8>,
+}
+
+impl QuicHandshakeFrame {
+    fn new(handshake: proto::Handshake) -> Self {
+        use prost::Message;
+        Self {
+            handshake_bytes: handshake.encode_to_vec(),
+        }
+    }
+
+    fn decode(&self) -> TransportResult<proto::Handshake> {
+        use prost::Message;
+        proto::Handshake::decode(self.handshake_bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("failed to decode handshake: {}", e))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -447,33 +487,70 @@ enum QuicHandshakeResponse {
 
 fn quic_server_config(alpn: Option<String>) -> TransportResult<(ServerConfig, Vec<u8>)> {
     let cert = generate_simple_self_signed(vec!["localhost".into()])?;
-    let cert_der = cert.serialize_der()?;
-    let key = PrivateKey(cert.serialize_private_key_der());
+    let cert_der = cert.cert.der().to_vec();
+    let key_der = cert.key_pair.serialize_der();
+    let cert_chain = vec![CertificateDer::from(cert_der.clone())];
+    let private_key = PrivateKeyDer::try_from(key_der)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {:?}", e))?;
     let mut tls_config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(vec![RustlsCertificate(cert_der.clone())], key)?;
+        .with_single_cert(cert_chain, private_key)?;
     tls_config.alpn_protocols = vec![alpn.unwrap_or_else(|| "h2".into()).into_bytes()];
-    let mut server_config = ServerConfig::with_crypto(Arc::new(tls_config));
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)?,
+    ));
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-    server_config.transport = Arc::new(transport_config);
+    server_config.transport_config(Arc::new(transport_config));
     Ok((server_config, cert_der))
 }
 
+#[derive(Debug)]
 struct NoServerVerification;
 
 impl rustls::client::danger::ServerCertVerifier for NoServerVerification {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &RustlsServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
     }
 }
 
@@ -481,22 +558,21 @@ fn quic_client_config(
     cert_der: Option<Vec<u8>>,
     alpn: Option<String>,
 ) -> TransportResult<ClientConfig> {
-    let mut tls = RustlsClientConfig::builder().with_safe_defaults();
-    let tls = if let Some(der) = cert_der {
+    let mut tls = if let Some(der) = cert_der {
         let mut roots = RootCertStore::empty();
-        roots.add(RustlsCertificate(der))?;
-        tls.with_root_certificates(roots).with_no_client_auth()
+        roots.add(CertificateDer::from(der))?;
+        RustlsClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
     } else {
-        let mut cfg = tls
-            .with_root_certificates(RootCertStore::empty())
-            .with_no_client_auth();
-        cfg.dangerous()
-            .set_certificate_verifier(Arc::new(NoServerVerification));
-        cfg
+        RustlsClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoServerVerification))
+            .with_no_client_auth()
     };
-    let mut tls = tls;
     tls.alpn_protocols = vec![alpn.unwrap_or_else(|| "h2".into()).into_bytes()];
-    Ok(ClientConfig::new(Arc::new(tls)))
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
+    Ok(ClientConfig::new(Arc::new(quic_config)))
 }
 
 fn proto_handshake_or_default(
@@ -517,7 +593,7 @@ async fn server_verify_quic_handshake(
 ) -> TransportResult<()> {
     let frame_bytes = read_len_prefixed(&mut recv).await?;
     let incoming: QuicHandshakeFrame = bincode::deserialize(&frame_bytes)?;
-    let provided = handshake_from_proto(Some(incoming.handshake))?;
+    let provided = handshake_from_proto(Some(incoming.decode()?))?;
     let verify_res = verify_with_expected(expected, provided);
     let resp = match &verify_res {
         Ok(_) => QuicHandshakeResponse::Ok,
@@ -525,7 +601,7 @@ async fn server_verify_quic_handshake(
     };
     let resp_bytes = bincode::serialize(&resp)?;
     write_len_prefixed(&mut send, &resp_bytes).await?;
-    let _ = send.finish().await;
+    let _ = send.finish();
     verify_res
 }
 
@@ -537,14 +613,12 @@ async fn client_send_quic_handshake(
         hs.verify()?;
     }
     let (mut send, mut recv) = connection.open_bi().await?;
-    let frame = QuicHandshakeFrame {
-        handshake: proto_handshake_or_default(handshake)?,
-    };
+    let frame = QuicHandshakeFrame::new(proto_handshake_or_default(handshake)?);
     let bytes = bincode::serialize(&frame)?;
     write_len_prefixed(&mut send, &bytes).await?;
     let resp_bytes = read_len_prefixed(&mut recv).await?;
     let resp: QuicHandshakeResponse = bincode::deserialize(&resp_bytes)?;
-    let _ = send.finish().await;
+    let _ = send.finish();
     match resp {
         QuicHandshakeResponse::Ok => Ok(()),
         QuicHandshakeResponse::Error(err) => anyhow::bail!(err),
@@ -594,13 +668,21 @@ impl CapabilityAdvertisement {
 }
 
 /// In-VM queue transport using broadcast + local log.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InVmQueue {
     /// Append-only log.
     pub log: Arc<dyn AppendLogStorage>,
     registry: ChannelRegistry,
     tx: Sender<Envelope>,
     queue_depth: usize,
+}
+
+impl std::fmt::Debug for InVmQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InVmQueue")
+            .field("queue_depth", &self.queue_depth)
+            .finish_non_exhaustive()
+    }
 }
 
 impl InVmQueue {
@@ -771,6 +853,7 @@ impl UnixIpc {
             default_persistent_log("unix-ipc")?,
             DEFAULT_QUEUE_DEPTH,
         )
+        .await
     }
 
     /// Bind a Unix socket transport with a provided log.
@@ -807,11 +890,11 @@ impl UnixIpc {
         tokio::spawn(async move {
             loop {
                 match self.listener.accept().await {
-                    Ok((mut stream, _addr)) => {
+                    Ok((stream, _addr)) => {
                         info!("unix ipc: client connected");
                         let this = self.clone();
                         tokio::spawn(async move {
-                            let res = this.handle_client(&mut stream).await;
+                            let res = this.handle_client(stream).await;
                             if let Err(err) = res {
                                 warn!("unix ipc client error: {err:?}");
                             }
@@ -826,9 +909,11 @@ impl UnixIpc {
         })
     }
 
-    async fn handle_client(self: Arc<Self>, stream: &mut UnixStream) -> TransportResult<()> {
+    async fn handle_client(self: Arc<Self>, stream: UnixStream) -> TransportResult<()> {
+        let (mut read_half, write_half) = stream.into_split();
+        let write_half = Arc::new(Mutex::new(write_half));
         loop {
-            let frame = match read_frame(stream).await {
+            let frame = match read_len_prefixed(&mut read_half).await {
                 Ok(body) => body,
                 Err(err) => {
                     warn!("unix ipc read error: {err:?}");
@@ -844,7 +929,7 @@ impl UnixIpc {
                         Err(err) => IpcResponse::Error(err.to_string()),
                     };
                     let bytes = serialize_frame(&resp)?;
-                    if let Err(err) = stream.write_all(&bytes).await {
+                    if let Err(err) = write_half.lock().await.write_all(&bytes).await {
                         warn!("unix ipc append response error: {err:?}");
                         break;
                     }
@@ -855,19 +940,19 @@ impl UnixIpc {
                         Err(err) => IpcResponse::Error(err.to_string()),
                     };
                     let bytes = serialize_frame(&resp)?;
-                    if let Err(err) = stream.write_all(&bytes).await {
+                    if let Err(err) = write_half.lock().await.write_all(&bytes).await {
                         warn!("unix ipc read response error: {err:?}");
                         break;
                     }
                 }
                 IpcRequest::Subscribe => {
                     let resp = serialize_frame(&IpcResponse::SubscribeAck)?;
-                    if let Err(err) = stream.write_all(&resp).await {
+                    if let Err(err) = write_half.lock().await.write_all(&resp).await {
                         warn!("unix ipc subscribe ack error: {err:?}");
                         break;
                     }
                     let mut rx = self.broadcast.subscribe();
-                    let mut stream = stream.try_clone()?;
+                    let write_half = write_half.clone();
                     tokio::spawn(async move {
                         loop {
                             match rx.recv().await {
@@ -875,7 +960,7 @@ impl UnixIpc {
                                     let evt = serialize_frame(&IpcEvent::Envelope(env));
                                     match evt {
                                         Ok(bytes) => {
-                                            if let Err(err) = stream.write_all(&bytes).await {
+                                            if let Err(err) = write_half.lock().await.write_all(&bytes).await {
                                                 warn!("unix ipc event send error: {err:?}");
                                                 break;
                                             }
@@ -1092,12 +1177,14 @@ impl proto::transport_server::Transport for GrpcTransportService {
         request: Request<proto::SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let rx = self.broadcast.subscribe();
-        let stream = BroadcastStream::new(rx).filter_map(|res| match res {
-            Ok(env) => match envelope_to_proto(&env) {
-                Ok(proto) => Some(Ok(proto)),
+        let stream = BroadcastStream::new(rx).filter_map(|res| {
+            futures::future::ready(match res {
+                Ok(env) => match envelope_to_proto(&env) {
+                    Ok(proto) => Some(Ok(proto)),
+                    Err(err) => Some(Err(Status::internal(err.to_string()))),
+                },
                 Err(err) => Some(Err(Status::internal(err.to_string()))),
-            },
-            Err(err) => Some(Err(Status::internal(err.to_string()))),
+            })
         });
         let (tx, rx) = tokio::sync::mpsc::channel(self.queue_depth);
         tokio::spawn(async move {
@@ -1142,95 +1229,72 @@ pub async fn spawn_quic_grpc_server_with_log(
 ) -> TransportResult<(JoinHandle<()>, std::net::SocketAddr, Vec<u8>)> {
     let addr: SocketAddr = endpoint.parse()?;
     let (server_config, cert_der) = quic_server_config(alpn.clone())?;
-    let (endpoint, incoming) = Endpoint::server(server_config, addr)?;
+    let endpoint = Endpoint::server(server_config, addr)?;
     let local_addr = endpoint.local_addr()?;
     let service = GrpcTransportService::new(log, registry, attestation.clone(), queue_depth);
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<QuicGrpcStream, std::io::Error>>(queue_depth);
     tokio::spawn(async move {
-        tokio::pin!(incoming);
-        while let Some(connecting) = incoming.next().await {
-            match connecting.await {
-                Ok(mut new_conn) => {
-                    let expected = attestation.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let mut bi_streams = new_conn.bi_streams;
-                        let conn = new_conn.connection;
-                        let handshake_stream = bi_streams.next().await;
-                        let Some(handshake_res) = handshake_stream else {
-                            conn.close(0u32.into(), b"missing handshake");
-                            let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::ConnectionAborted,
-                                    "missing handshake stream",
-                                )))
-                                .await;
-                            return;
-                        };
-                        match handshake_res {
-                            Ok((send, recv)) => {
-                                let verify =
-                                    server_verify_quic_handshake(&expected, recv, send).await;
-                                if let Err(err) = verify {
-                                    conn.close(0u32.into(), b"handshake failed");
-                                    let _ = tx
-                                        .send(Err(std::io::Error::new(
-                                            std::io::ErrorKind::PermissionDenied,
-                                            err.to_string(),
-                                        )))
-                                        .await;
-                                    return;
-                                }
-                            }
-                            Err(err) => {
-                                conn.close(0u32.into(), b"handshake stream error");
-                                let _ = tx
-                                    .send(Err(std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        err.to_string(),
-                                    )))
-                                    .await;
-                                return;
-                            }
-                        }
+        while let Some(connecting) = endpoint.accept().await {
+            let expected = attestation.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let conn = match connecting.await {
+                    Ok(c) => c,
+                    Err(err) => {
+                        let _ = tx
+                            .send(Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                err.to_string(),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
 
-                        let next_stream = bi_streams.next().await;
-                        match next_stream {
-                            Some(Ok((send, recv))) => {
-                                let stream = QuicGrpcStream::new(conn.clone(), send, recv);
-                                let _ = tx.send(Ok(stream)).await;
-                            }
-                            Some(Err(err)) => {
-                                conn.close(0u32.into(), b"stream error");
-                                let _ = tx
-                                    .send(Err(std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        err.to_string(),
-                                    )))
-                                    .await;
-                            }
-                            None => {
-                                conn.close(0u32.into(), b"missing grpc stream");
-                                let _ = tx
-                                    .send(Err(std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        "no gRPC stream provided",
-                                    )))
-                                    .await;
-                            }
-                        }
-                    });
-                }
-                Err(err) => {
+                // Accept handshake stream
+                let (send, recv) = match conn.accept_bi().await {
+                    Ok(streams) => streams,
+                    Err(err) => {
+                        conn.close(0u32.into(), b"missing handshake");
+                        let _ = tx
+                            .send(Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                format!("handshake stream error: {}", err),
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+
+                if let Err(err) = server_verify_quic_handshake(&expected, recv, send).await {
+                    conn.close(0u32.into(), b"handshake failed");
                     let _ = tx
                         .send(Err(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionAborted,
+                            std::io::ErrorKind::PermissionDenied,
                             err.to_string(),
                         )))
                         .await;
+                    return;
                 }
-            }
+
+                // Accept gRPC stream
+                match conn.accept_bi().await {
+                    Ok((send, recv)) => {
+                        let stream = QuicGrpcStream::new(conn.clone(), send, recv);
+                        let _ = tx.send(Ok(stream)).await;
+                    }
+                    Err(err) => {
+                        conn.close(0u32.into(), b"stream error");
+                        let _ = tx
+                            .send(Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                err.to_string(),
+                            )))
+                            .await;
+                    }
+                }
+            });
         }
     });
 
@@ -1296,8 +1360,9 @@ impl QuicGrpcAdapter {
             return Err(err);
         }
 
-        let connector = service_fn(move |_: http::Uri| {
-            let conn = connection.clone();
+        let connector_conn = connection.clone();
+        let connector = service_fn(move |_: tonic::transport::Uri| {
+            let conn = connector_conn.clone();
             async move {
                 let (send, recv) = conn
                     .open_bi()
@@ -1312,7 +1377,7 @@ impl QuicGrpcAdapter {
         Ok(Self {
             client: proto::transport_client::TransportClient::new(channel),
             endpoint,
-            connection,
+            connection: connection.clone(),
             attestation,
             queue_depth: queue_depth.max(1),
         })
@@ -1399,7 +1464,7 @@ impl Transport for QuicGrpcAdapter {
 }
 
 /// Mailbox transport for enclave/chip boundaries with bounded slots.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MailboxTransport {
     _mailbox: String,
     slot_bytes: usize,
@@ -1410,6 +1475,17 @@ pub struct MailboxTransport {
     buffer: Arc<Mutex<VecDeque<Envelope>>>,
     _attestation: Option<AttestationHandshake>,
     queue_depth: usize,
+}
+
+impl std::fmt::Debug for MailboxTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailboxTransport")
+            .field("mailbox", &self._mailbox)
+            .field("slot_bytes", &self.slot_bytes)
+            .field("slots", &self.slots)
+            .field("queue_depth", &self.queue_depth)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MailboxTransport {

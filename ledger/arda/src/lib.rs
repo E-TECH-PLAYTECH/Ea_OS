@@ -289,7 +289,7 @@ mod tests {
     async fn submit_and_replay() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let registry = registry_for(signing_key.verifying_key().to_bytes());
-        let transport: Arc<dyn Transport> = Arc::new(InVmQueue::with_registry(registry.clone()));
+        let transport: Arc<dyn Transport> = Arc::new(InVmQueue::with_registry(registry.clone()).unwrap());
         let orchestrator = ArdaOrchestrator::new(
             transport,
             registry,
@@ -298,6 +298,7 @@ mod tests {
             DEFAULT_SCHEMA_VERSION,
         );
         orchestrator.hydrate(32).await.unwrap();
+        orchestrator.start_subscription().await.unwrap();
 
         let entry = orchestrator
             .submit_command(

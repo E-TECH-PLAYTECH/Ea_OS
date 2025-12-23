@@ -1828,6 +1828,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1872,6 +1873,7 @@ dependencies = [
  "bytes",
  "ed25519-dalek",
  "futures",
+ "http 1.4.0",
  "ledger-core",
  "ledger-spec",
  "prost",
@@ -1879,6 +1881,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rcgen",
  "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tokio",
@@ -3617,6 +3620,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
