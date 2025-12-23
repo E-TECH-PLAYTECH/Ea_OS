@@ -2,8 +2,10 @@
 // Eä Referee v5.0 — Secure UEFI Bootloader with v5.0 Crypto Integration
 #![no_std]
 #![no_main]
-#![feature(abi_efiapi)]
 
+extern crate alloc;
+
+use alloc::format;
 use uefi::prelude::*;
 use uefi::table::boot::BootServices;
 
@@ -27,7 +29,7 @@ struct RefereeState {
 impl RefereeState {
     const fn new() -> Self {
         Self {
-            muscles: [None; N_MUSCLES],
+            muscles: [const { None }; N_MUSCLES],
             loaded_count: 0,
         }
     }
@@ -36,41 +38,41 @@ impl RefereeState {
 static mut STATE: RefereeState = RefereeState::new();
 
 #[entry]
-fn efi_main(_image: Handle, system_table: SystemTable<Boot>) -> Status {
+fn efi_main(_image: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services
-    uefi_services::init(&system_table).unwrap_success();
+    uefi_services::init(&mut system_table).unwrap();
 
     let boot_services = system_table.boot_services();
     let mut uart = Uart::new();
 
     // Initialize UART for logging
     if let Err(e) = uart.init() {
-        log(&uart, "ERROR", &format!("UART init failed: {}", e));
+        log(&mut uart, "ERROR", &format!("UART init failed: {:?}", e));
         return Status::LOAD_ERROR;
     }
 
-    log(&uart, "INFO", "Eä Referee v5.0 awakening...");
+    log(&mut uart, "INFO", "Eä Referee v5.0 awakening...");
 
     // Load master chaos key
     let master_key = match load_master_key(boot_services) {
         Ok(key) => {
-            log(&uart, "INFO", "Chaos master key acquired");
+            log(&mut uart, "INFO", "Chaos master key acquired");
             key
         }
         Err(e) => {
-            log(&uart, "FATAL", &format!("Master key load failed: {}", e));
+            log(&mut uart, "FATAL", &format!("Master key load failed: {}", e));
             return Status::LOAD_ERROR;
         }
     };
 
     // Load and validate all muscles
     if let Err(e) = load_all_muscles(boot_services, &master_key, &mut uart) {
-        log(&uart, "FATAL", &format!("Muscle loading failed: {}", e));
+        log(&mut uart, "FATAL", &format!("Muscle loading failed: {}", e));
         return Status::LOAD_ERROR;
     }
 
     log(
-        &uart,
+        &mut uart,
         "INFO",
         &format!("{} muscles alive — Eä breathes", unsafe {
             STATE.loaded_count
@@ -78,7 +80,7 @@ fn efi_main(_image: Handle, system_table: SystemTable<Boot>) -> Status {
     );
 
     // Transfer control to scheduler
-    run_scheduler(&mut uart)
+    run_scheduler(boot_services, &mut uart)
 }
 
 /// Load master key from fixed memory location
@@ -121,6 +123,7 @@ fn load_all_muscles(
         // Load and validate muscle
         match load_muscle(boot_services, master_key, blob_data, i) {
             Ok(loaded_muscle) => {
+                let muscle_name = loaded_muscle.name.clone();
                 unsafe {
                     STATE.muscles[i] = Some(loaded_muscle);
                     STATE.loaded_count += 1;
@@ -128,7 +131,7 @@ fn load_all_muscles(
                 log(
                     uart,
                     "INFO",
-                    &format!("Muscle '{}' loaded successfully", loaded_muscle.name),
+                    &format!("Muscle '{}' loaded successfully", muscle_name),
                 );
             }
             Err(e) => {
@@ -150,7 +153,7 @@ fn load_all_muscles(
 }
 
 /// Simple round-robin scheduler
-fn run_scheduler(uart: &mut Uart) -> ! {
+fn run_scheduler(boot_services: &BootServices, uart: &mut Uart) -> ! {
     log(uart, "INFO", "Starting muscle scheduler...");
 
     let mut current_muscle = 0;
@@ -177,10 +180,7 @@ fn run_scheduler(uart: &mut Uart) -> ! {
         current_muscle += 1;
 
         // Small delay to prevent busyloop
-        unsafe {
-            let bs = uefi::table::SystemTable::<uefi::table::Boot>::current().boot_services();
-            bs.stall(1000);
-        }
+        boot_services.stall(1000);
     }
 }
 
@@ -206,4 +206,10 @@ unsafe fn execute_muscle(entry_point: u64) {
 /// Log message via UART
 fn log(uart: &mut Uart, level: &str, message: &str) {
     let _ = uart.write_str(&format!("[{}] {}\n", level, message));
+}
+
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
 }
