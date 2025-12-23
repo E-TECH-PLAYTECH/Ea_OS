@@ -15,16 +15,15 @@ all Eä biological computing principles.
 extern crate alloc;
 
 use aes_gcm::{
-    aead::{generic_array::GenericArray, Aead, Payload},
+    aead::{generic_array::GenericArray, Aead},
     Aes256Gcm, KeyInit,
 };
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::marker::PhantomData;
 use hmac::{Hmac, Mac};
 use muscle_ea_core::{
     biology::*,
     error::MuscleError,
-    prelude::*,
     runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
 };
 use rand_core::{CryptoRng, RngCore};
@@ -32,13 +31,13 @@ use sha3::{
     digest::{ExtendableOutput, Update, XofReader},
     Shake256,
 };
-use smallvec::SmallVec;
+use subtle::ConstantTimeEq;
 use wasmtime::*;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Sealed blob header for pathfinder muscles
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PathfinderHeader {
     version: u32,        // 3 for pathfinder v1
     salt: [u8; 16],      // Muscle salt
@@ -49,8 +48,11 @@ struct PathfinderHeader {
 
 impl PathfinderHeader {
     fn as_bytes(&self) -> &[u8] {
-        // Safe alternative to unsafe block
         bytemuck::bytes_of(self)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<&Self> {
+        bytemuck::try_from_bytes(bytes).ok()
     }
 }
 
@@ -87,8 +89,7 @@ impl<R: RngCore + CryptoRng> Muscle for PathfinderMuscle<R> {
         let (wasm_bytes, successor_keys) =
             unseal_pathfinder_blob(ctx.master_key(), sealed.salt(), &sealed.payload)?;
 
-        let result =
-            run_pathfinder_isolate(&wasm_bytes, &private_input, successor_keys, ctx.rng())?;
+        let result = run_pathfinder_isolate(&wasm_bytes, &private_input, successor_keys)?;
 
         Ok(MuscleOutput {
             output: result.output,
@@ -105,55 +106,53 @@ struct PathfinderResult {
 }
 
 /// Biological cell state — the living cytoplasm of the pathfinder muscle
-struct PathfinderCell<R: RngCore + CryptoRng> {
+struct PathfinderCellData {
     input: Zeroizing<Vec<u8>>,
     output: Zeroizing<Vec<u8>>,
     successors: Vec<MuscleSuccessor>,
     successor_keys: Vec<[u8; 32]>,
-    rng: R,
-    fuel_remaining: u64,
 }
 
-impl<R: RngCore + CryptoRng> PathfinderCell<R> {
-    fn new(input: Vec<u8>, successor_keys: Vec<[u8; 32]>, rng: R) -> Self {
+impl PathfinderCellData {
+    fn new(input: Vec<u8>, successor_keys: Vec<[u8; 32]>) -> Self {
         Self {
             input: Zeroizing::new(input),
             output: Zeroizing::new(Vec::new()),
             successors: Vec::new(),
             successor_keys,
-            rng,
-            fuel_remaining: 500_000,
         }
     }
 
-    fn read_input(&self, ptr: u32, len: u32) -> Result<Vec<u8>, MuscleError> {
+    fn read_input(&self, ptr: u32, len: u32) -> anyhow::Result<Vec<u8>> {
         let start = ptr as usize;
         let end = start + len as usize;
 
         if end > self.input.len() {
-            return Err(MuscleError::IsolationFailure);
+            anyhow::bail!("input read out of bounds");
         }
 
         Ok(self.input[start..end].to_vec())
     }
 
-    fn write_output(&mut self, data: &[u8]) -> Result<(), MuscleError> {
+    fn write_output(&mut self, data: &[u8]) -> anyhow::Result<()> {
         if self.output.len() + data.len() > 1 << 20 {
             // 1 MiB max output
-            return Err(MuscleError::ResourceExhausted);
+            anyhow::bail!("output size limit exceeded");
         }
         self.output.extend_from_slice(data);
         Ok(())
     }
 
-    fn seal_successor(&mut self, wasm: &[u8]) -> Result<MuscleSuccessor, MuscleError> {
+    fn seal_successor(&mut self, wasm: &[u8]) -> anyhow::Result<MuscleSuccessor> {
         if self.successor_keys.is_empty() {
-            return Err(MuscleError::ResourceExhausted);
+            anyhow::bail!("no successor keys remaining");
         }
 
         let key = self.successor_keys.remove(0);
-        let salt = MuscleSalt::random(&mut self.rng);
-        let sealed_blob = seal_pathfinder_blob(&key, &salt, wasm, &mut self.rng)?;
+        let mut rng = rand::thread_rng();
+        let salt = MuscleSalt::random(&mut rng);
+        let sealed_blob = seal_pathfinder_blob(&key, &salt, wasm, &mut rng)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let successor = MuscleSuccessor {
             blob: sealed_blob,
@@ -176,9 +175,9 @@ fn unseal_pathfinder_blob(
         return Err(MuscleError::InvalidBlob);
     }
 
-    // Parse header
+    // Parse header using bytemuck (safe)
     let header_slice = &sealed[..core::mem::size_of::<PathfinderHeader>()];
-    let header: PathfinderHeader = unsafe { core::ptr::read(header_slice.as_ptr() as *const _) };
+    let header = PathfinderHeader::from_bytes(header_slice).ok_or(MuscleError::InvalidBlob)?;
 
     if header.version != 3 {
         return Err(MuscleError::InvalidBlob);
@@ -193,9 +192,9 @@ fn unseal_pathfinder_blob(
         return Err(MuscleError::InvalidBlob);
     }
 
-    // Verify MAC
+    // Verify MAC using constant-time comparison
     let expected_mac = compute_pathfinder_hmac(master_key, salt, sealed);
-    if !hmac::compare_digest(&expected_mac, &header.mac) {
+    if expected_mac.ct_eq(&header.mac).unwrap_u8() != 1 {
         return Err(MuscleError::InvalidBlob);
     }
 
@@ -230,11 +229,10 @@ fn unseal_pathfinder_blob(
     Ok((module_bytes, successor_keys))
 }
 
-fn run_pathfinder_isolate<R: RngCore + CryptoRng>(
+fn run_pathfinder_isolate(
     wasm: &[u8],
     private_input: &[u8],
     successor_keys: Vec<[u8; 32]>,
-    rng: &mut R,
 ) -> Result<PathfinderResult, MuscleError> {
     let engine = Engine::new(
         Config::new()
@@ -242,109 +240,101 @@ fn run_pathfinder_isolate<R: RngCore + CryptoRng>(
             .epoch_interruption(true)
             .static_memory_maximum_size(1 << 16) // 64 KiB — biological cell constraint
             .dynamic_memory_guard_size(0)
-            .guard_before_linear_mem(true)
             .cranelift_opt_level(wasmtime::OptLevel::Speed),
     )
-    .map_err(|e| MuscleError::IsolationFailure)?;
+    .map_err(|_| MuscleError::IsolationFailure)?;
 
     let mut store = Store::new(
         &engine,
-        PathfinderCell::new(
-            private_input.to_vec(),
-            successor_keys,
-            rng.try_clone().map_err(|_| MuscleError::RngFailure)?,
-        ),
+        PathfinderCellData::new(private_input.to_vec(), successor_keys),
     );
 
     store
-        .add_fuel(500_000)
+        .set_fuel(500_000)
         .map_err(|_| MuscleError::ResourceExhausted)?;
     store.set_epoch_deadline(1);
 
-    let module = Module::new(&engine, wasm).map_err(|e| MuscleError::MalformedOrganelle)?;
+    let module = Module::new(&engine, wasm).map_err(|_| MuscleError::MalformedOrganelle)?;
 
     // Create host functions for biological membrane interface
     let read_input_func = Func::wrap(
         &mut store,
-        |caller: Caller<'_, PathfinderCell<R>>,
-         ptr: u32,
-        len: u32,
-        out_ptr: u32|
-         -> Result<(), Trap> {
+        |mut caller: Caller<'_, PathfinderCellData>, ptr: u32, len: u32, out_ptr: u32| {
             let cell = caller.data();
-            let data = cell
-                .read_input(ptr, len)
-                .map_err(|e| Trap::from(format!("{}", e)))?;
+            let data = cell.read_input(ptr, len)?;
             let memory = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
-                .ok_or_else(|| Trap::from("no memory"))?;
-            memory.write(&caller, out_ptr as usize, &data)?;
+                .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
+            memory
+                .write(&mut caller, out_ptr as usize, &data)
+                .map_err(|e| anyhow::anyhow!("memory write: {}", e))?;
             Ok(())
         },
     );
 
     let write_output_func = Func::wrap(
         &mut store,
-        |mut caller: Caller<'_, PathfinderCell<R>>, ptr: u32, len: u32| -> Result<(), Trap> {
+        |mut caller: Caller<'_, PathfinderCellData>, ptr: u32, len: u32| {
             let memory = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
-                .ok_or_else(|| Trap::from("no memory"))?;
+                .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
             let mut data = vec![0u8; len as usize];
-            memory.read(&caller, ptr as usize, &mut data)?;
+            memory
+                .read(&caller, ptr as usize, &mut data)
+                .map_err(|e| anyhow::anyhow!("memory read: {}", e))?;
             caller
                 .data_mut()
                 .write_output(&data)
-                .map_err(|e| Trap::from(format!("{}", e)))?;
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             Ok(())
         },
     );
 
     let seal_successor_func = Func::wrap(
         &mut store,
-        |mut caller: Caller<'_, PathfinderCell<R>>,
+        |mut caller: Caller<'_, PathfinderCellData>,
          ptr: u32,
          len: u32,
          out_ptr: u32,
          out_len_ptr: u32|
-         -> Result<u32, Trap> {
+         -> anyhow::Result<u32> {
             let memory = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
-                .ok_or_else(|| Trap::from("no memory"))?;
+                .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
 
             // Read WASM bytes from guest memory
             let mut wasm_data = vec![0u8; len as usize];
             memory
                 .read(&caller, ptr as usize, &mut wasm_data)
-                .map_err(|e| Trap::from(format!("memory read failed: {}", e)))?;
+                .map_err(|e| anyhow::anyhow!("memory read: {}", e))?;
 
             // Create successor muscle
             let successor = caller
                 .data_mut()
                 .seal_successor(&wasm_data)
-                .map_err(|e| Trap::from(format!("seal failed: {}", e)))?;
+                .map_err(|e| anyhow::anyhow!("seal: {}", e))?;
 
             // Serialize successor to bytes for return to guest
             let serialized = serialize_successor_for_guest(&successor)
-                .map_err(|e| Trap::from(format!("serialization failed: {}", e)))?;
+                .map_err(|e| anyhow::anyhow!("serialize: {}", e))?;
 
             // Write serialized data back to guest memory
             if serialized.len() > 4096 {
-                // Reasonable limit for successor data
-                return Err(Trap::from("successor data too large"));
+                anyhow::bail!("successor data too large");
             }
 
             memory
                 .write(&mut caller, out_ptr as usize, &serialized)
-                .map_err(|e| Trap::from(format!("memory write failed: {}", e)))?;
+                .map_err(|e| anyhow::anyhow!("memory write: {}", e))?;
 
             // Write length to guest memory
             let len_bytes = (serialized.len() as u32).to_le_bytes();
             memory
                 .write(&mut caller, out_len_ptr as usize, &len_bytes)
-                .map_err(|e| Trap::from(format!("length write failed: {}", e)))?;
+                .map_err(|e| anyhow::anyhow!("length write: {}", e))?;
 
             Ok(0) // Success return code
         },
@@ -359,17 +349,18 @@ fn run_pathfinder_isolate<R: RngCore + CryptoRng>(
             seal_successor_func.into(),
         ],
     )
-    .map_err(|e| MuscleError::MalformedOrganelle)?;
+    .map_err(|_| MuscleError::MalformedOrganelle)?;
 
     let run = instance
         .get_func(&mut store, "run")
         .ok_or(MuscleError::MissingEntryPoint)?;
 
-    run.call(&mut store, &[], &mut []).map_err(|trap| {
-        if trap.downcast_ref::<wasmtime::FuelExhausted>().is_some() {
+    run.call(&mut store, &[], &mut []).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("fuel") {
             MuscleError::ResourceExhausted
         } else {
-            MuscleError::Trap(trap.to_string())
+            MuscleError::Trap(msg)
         }
     })?;
 
@@ -427,10 +418,11 @@ fn derive_pathfinder_key(master_key: &[u8; 32], salt: &MuscleSalt, nonce: &[u8; 
 
 fn compute_pathfinder_hmac(master_key: &[u8; 32], salt: &MuscleSalt, data: &[u8]) -> [u8; 16] {
     type HmacSha3256 = Hmac<sha3::Sha3_256>;
-    let mut mac = HmacSha3256::new_from_slice(master_key).expect("HMAC key should be valid");
-    mac.update(b"MUSCLE_PATHFINDER_V1_MAC");
-    mac.update(salt.as_bytes());
-    mac.update(data);
+    let mut mac =
+        <HmacSha3256 as Mac>::new_from_slice(master_key).expect("HMAC key should be valid");
+    Mac::update(&mut mac, b"MUSCLE_PATHFINDER_V1_MAC");
+    Mac::update(&mut mac, salt.as_bytes());
+    Mac::update(&mut mac, data);
 
     let result = mac.finalize().into_bytes();
     let mut truncated = [0u8; 16];
@@ -487,7 +479,7 @@ fn seal_pathfinder_blob(
         + core::mem::size_of_val(&header.nonce);
     sealed_data[mac_offset..mac_offset + 16].copy_from_slice(&mac);
 
-    Ok(SealedBlob::new(sealed_data, *salt, 3))
+    Ok(SealedBlob::new(sealed_data, salt.clone(), 3))
 }
 
 #[cfg(test)]
@@ -498,15 +490,15 @@ mod tests {
     #[test]
     fn test_pathfinder_muscle_creation() {
         let muscle = PathfinderMuscle::<OsRng>::default();
-        assert!(core::mem::size_of_val(&muscle) > 0);
+        // PhantomData is zero-sized, which is fine - just verify we can create one
+        let _ = muscle;
     }
 
     #[test]
     fn test_pathfinder_cell_operations() {
-        let mut rng = OsRng;
         let input = vec![1, 2, 3, 4, 5];
         let keys = vec![[0u8; 32]];
-        let cell = PathfinderCell::new(input.clone(), keys, &mut rng);
+        let cell = PathfinderCellData::new(input.clone(), keys);
 
         let read_data = cell.read_input(1, 3).unwrap();
         assert_eq!(read_data, vec![2, 3, 4]);
