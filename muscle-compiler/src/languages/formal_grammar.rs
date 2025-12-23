@@ -158,7 +158,7 @@ fn parse_rule(input: &str) -> IResult<&str, Rule> {
     let (input, event) = parse_event_name(input)?;
     let (input, _) = tag(":")(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, body) = many1(parse_statement)(input)?;
+    let (input, body) = many1(parse_statement).parse(input)?;
 
     // Ensure no leftover content after parsing a rule and prepare for the next rule
     let (input, _) = multispace0(input)?;
@@ -268,7 +268,7 @@ fn parse_if_stmt(input: &str) -> IResult<&str, IfStmt> {
                 preceded(tag("->"), preceded(multispace0, parse_action)),
             ),
         ),
-    ))(input)?;
+    )).parse(input)?;
 
     // Ensure proper block termination and avoid consuming content for the next rule
     let (input, _) = multispace0(input)?;

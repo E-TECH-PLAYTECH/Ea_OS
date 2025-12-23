@@ -1,0 +1,5 @@
+[build]
+target = "aarch64-unknown-uefi"
+
+[target.aarch64-unknown-uefi]
+runner = "qemu-system-aarch64 -M virt -cpu cortex-a72 -bios /usr/share/ovmf/AAVMF_CODE.fd -drive format=raw,file=fat:rw:target/aarch64-unknown-uefi/debug/ -net none -nographic"
