@@ -1,28 +1,28 @@
 //! # Eä Symbiote
-//! 
+//!
 //! Cryptographic immune system for autonomous security response via lattice policies.
-//! 
+//!
 //! ## Overview
-//! 
+//!
 //! Symbiote implements policy-as-code for the Eä ecosystem, providing automated
 //! response to known vulnerabilities while maintaining all cryptographic security
 //! guarantees.
-//! 
+//!
 //! ## Security Model
-//! 
+//!
 //! - **No privilege escalation**: Uses only public lattice capabilities
 //! - **Append-only operations**: Cannot modify existing versions
 //! - **Node autonomy**: Updates can be rejected by any node
 //! - **Full auditability**: All actions permanently recorded on lattice
-//! 
+//!
 //! ## Example
-//! 
+//!
 //! ```rust
 //! use ea_symbiote::{Symbiote, PolicyEngine};
-//! 
+//!
 //! let symbiote = Symbiote::new();
 //! let policy_engine = PolicyEngine::default();
-//! 
+//!
 //! // Process lattice updates and apply security policies
 //! for update in lattice_updates {
 //!     if let Some(action) = policy_engine.evaluate(&update) {
@@ -38,10 +38,10 @@
 
 extern crate alloc;
 
-use ea_lattice_ledger::{MuscleUpdate, LatticeRoot, verify_update};
+use ea_lattice_ledger::{verify_update, LatticeRoot, MuscleUpdate};
 
 mod policy_engine;
-pub use policy_engine::{PolicyEngine, SecurityPolicy, PolicyAction};
+pub use policy_engine::{PolicyAction, PolicyEngine, SecurityPolicy};
 
 pub mod patches;
 
@@ -108,7 +108,7 @@ impl Symbiote {
         // 2. Apply the security patch
         // 3. Recompile and seal the patched muscle
         // 4. Generate lattice update for version + 1
-        
+
         // For now, return None as placeholder
         // Full implementation requires integration with muscle compiler
         None
@@ -144,8 +144,11 @@ impl Default for SymbioteConfig {
 #[cfg(feature = "std")]
 impl std::fmt::Display for Symbiote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Symbiote(root: {}, policies: {})", 
-               hex::encode(self.current_root),
-               self.policy_engine.policy_count())
+        write!(
+            f,
+            "Symbiote(root: {}, policies: {})",
+            hex::encode(self.current_root),
+            self.policy_engine.policy_count()
+        )
     }
 }

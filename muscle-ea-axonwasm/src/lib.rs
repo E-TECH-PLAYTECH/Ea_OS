@@ -13,18 +13,18 @@ The first true streaming neural fiber capable of:
 
 extern crate alloc;
 
-use alloc::{vec::Vec, vec_deque::VecDeque, format, string::String};
+use alloc::{format, string::String, vec::Vec, vec_deque::VecDeque};
 use core::marker::PhantomData;
 use muscle_ea_core::{
     biology::*,
-    runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
     error::MuscleError,
     prelude::*,
+    runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
 };
 use muscle_ea_pathfinder::PathfinderMuscle;
-use sha3::{Sha3_256, Digest};
+use rand_core::{CryptoRng, RngCore};
+use sha3::{Digest, Sha3_256};
 use zeroize::Zeroizing;
-use rand_core::{RngCore, CryptoRng};
 
 /// Incoming neural signal — carries multiple sealed organelles (dendritic input)
 #[derive(Debug, Clone)]
@@ -80,7 +80,7 @@ pub struct AxonWasmMuscle<R: RngCore + CryptoRng = rand_core::OsRng> {
 impl<R: RngCore + CryptoRng> Default for AxonWasmMuscle<R> {
     fn default() -> Self {
         Self {
-            max_parallelism: 8,  // Reduced for no-std compatibility
+            max_parallelism: 8, // Reduced for no-std compatibility
             fuel_per_pulse: 1_000_000,
             _phantom: PhantomData,
         }
@@ -146,12 +146,17 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
     fn propagate(&mut self) -> Result<AxonPulse, MuscleError> {
         // Execute organelles with limited parallelism (synaptic firing)
         let mut executing = Vec::with_capacity(self.muscle.max_parallelism);
-        
-        for blob in self.incoming.organelles.iter().take(self.muscle.max_parallelism) {
+
+        for blob in self
+            .incoming
+            .organelles
+            .iter()
+            .take(self.muscle.max_parallelism)
+        {
             if self.fuel_remaining == 0 {
                 break; // Refractory period - no more firing
             }
-            
+
             match self.fire_organelle_sync(blob) {
                 Ok(output) => {
                     self.fuel_remaining = self.fuel_remaining.saturating_sub(50_000);
@@ -170,14 +175,17 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
     /// Fire a single organelle synchronously (synaptic terminal)
     fn fire_organelle_sync(&self, blob: &SealedBlob) -> Result<MuscleOutput<Vec<u8>>, MuscleError> {
         let pathfinder = PathfinderMuscle::default();
-        
+
         // Create execution context for this organelle
         let mut organelle_ctx = MuscleContext::new(
             blob.clone(),
             *self.ctx.master_key(),
-            self.ctx.rng().try_clone().map_err(|_| MuscleError::RngFailure)?,
+            self.ctx
+                .rng()
+                .try_clone()
+                .map_err(|_| MuscleError::RngFailure)?,
         );
-        
+
         pathfinder.execute(&mut organelle_ctx, Vec::new())
     }
 
@@ -222,9 +230,18 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
                     4, // Axon version
                 ),
                 metadata: SuccessorMetadata::new(4, "myelinated_continuation".to_string())
-                    .with_property("intensity".to_string(), self.fired_organelles.len().to_string())
-                    .with_property("urgency".to_string(), self.incoming.metadata.urgency.to_string())
-                    .with_property("lineage".to_string(), hex::encode(self.incoming.metadata.lineage_tag)),
+                    .with_property(
+                        "intensity".to_string(),
+                        self.fired_organelles.len().to_string(),
+                    )
+                    .with_property(
+                        "urgency".to_string(),
+                        self.incoming.metadata.urgency.to_string(),
+                    )
+                    .with_property(
+                        "lineage".to_string(),
+                        hex::encode(self.incoming.metadata.lineage_tag),
+                    ),
             };
             successors.push(continuation);
         }
@@ -258,7 +275,7 @@ mod tests {
             organelles: Vec::new(),
             metadata: SignalMetadata::new(1, 150, [0xAA; 8]),
         };
-        
+
         assert_eq!(signal.metadata.neurotransmitter, 1);
         assert_eq!(signal.metadata.urgency, 150);
         assert_eq!(signal.metadata.lineage_tag, [0xAA; 8]);
@@ -276,12 +293,12 @@ mod tests {
         let muscle = AxonWasmMuscle::<OsRng>::default();
         let blob = SealedBlob::new(Vec::new(), MuscleSalt::new([0; 16]), 1);
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
-        
+
         let signal = AxonSignal {
             organelles: Vec::new(),
             metadata: SignalMetadata::new(0, 0, [0; 8]),
         };
-        
+
         let fiber = AxonFiber::new(&muscle, &mut ctx, signal).unwrap();
         assert_eq!(fiber.fuel_remaining, muscle.fuel_per_pulse);
     }
@@ -291,15 +308,15 @@ mod tests {
         let muscle = AxonWasmMuscle::<OsRng>::default();
         let blob = SealedBlob::new(Vec::new(), MuscleSalt::new([0; 16]), 1);
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
-        
+
         let signal = AxonSignal {
             organelles: Vec::new(),
             metadata: SignalMetadata::new(0, 0, [0xBB; 8]),
         };
-        
+
         let fiber = AxonFiber::new(&muscle, &mut ctx, signal).unwrap();
         let trace = fiber.generate_refractory_trace();
-        
+
         assert_eq!(trace.len(), 8); // 8-byte refractory trace
     }
 
@@ -308,19 +325,22 @@ mod tests {
         let muscle = AxonWasmMuscle::<OsRng>::default();
         let blob = SealedBlob::new(Vec::new(), MuscleSalt::new([0; 16]), 1);
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
-        
+
         // High urgency signal should trigger myelinated continuation
         let signal = AxonSignal {
             organelles: Vec::new(),
             metadata: SignalMetadata::new(0, 250, [0xCC; 8]), // High urgency
         };
-        
+
         let mut fiber = AxonFiber::new(&muscle, &mut ctx, signal).unwrap();
         let _pulse = fiber.propagate().unwrap(); // Ignore pulse for this test
         let successors = fiber.emit_successors();
-        
+
         // Should contain myelinated continuation due to high urgency
         assert!(!successors.is_empty());
-        assert_eq!(successors[0].metadata.muscle_type, "myelinated_continuation");
+        assert_eq!(
+            successors[0].metadata.muscle_type,
+            "myelinated_continuation"
+        );
     }
 }

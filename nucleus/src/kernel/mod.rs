@@ -1,7 +1,7 @@
-mod nucleus;
 mod capabilities;
+mod nucleus;
 mod scheduler;
 
-pub use nucleus::MuscleNucleus;
 pub use capabilities::{Capability, CapabilitySet};
-pub use scheduler::{Scheduler, Priority};
+pub use nucleus::MuscleNucleus;
+pub use scheduler::{Priority, Scheduler};

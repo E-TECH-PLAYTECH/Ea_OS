@@ -6,18 +6,18 @@ impl BootRule {
     pub const fn new() -> Self {
         Self
     }
-    
+
     pub fn execute(attestation: &mut HardwareAttestation, lattice: &LatticeStream) -> bool {
         // 1. Verify hardware attestation
         if !attestation.verify() {
             return false;
         }
-        
+
         // 2. Verify lattice root matches genesis
         if !lattice.verify_root() {
             return false;
         }
-        
+
         true
     }
 }

@@ -21,12 +21,12 @@ proptest! {
 #[test]
 fn muscle_loader_sanity() {
     // Test basic muscle loader functionality
-    use referee::muscle_loader::{generate_salt, calculate_required_pages};
-    
+    use referee::muscle_loader::{calculate_required_pages, generate_salt};
+
     let salt1 = generate_salt(0, "test");
     let salt2 = generate_salt(0, "test");
     assert_eq!(salt1, salt2);
-    
+
     assert_eq!(calculate_required_pages(4096), 1);
     assert_eq!(calculate_required_pages(4097), 2);
 }

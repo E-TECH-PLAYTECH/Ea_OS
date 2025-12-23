@@ -41,36 +41,30 @@ impl PreNucleusLoader {
             asm!(
                 // Save boot parameters from Referee (in X0)
                 "mov x19, x0",
-                
                 // 1. Verify Nucleus blob signature
                 "bl verify_nucleus_blob",
                 "cbz x0, verification_failed",
-                
-                // 2. Set up Nucleus execution environment  
+                // 2. Set up Nucleus execution environment
                 "bl setup_nucleus_environment",
-                
                 // 3. Get Nucleus entry point
                 "bl get_nucleus_entry",
                 "mov x20, x0",
-                
                 // 4. Transfer control to Nucleus Muscle
                 "br x20",
-                
                 "verification_failed:",
                 "b halt_system",
-                
                 options(noreturn)
             );
         }
     }
-    
+
     /// Verify the embedded Nucleus blob signature
     fn verify_nucleus_blob() -> u64 {
         // In production, this would verify BLAKE3 hash and signature
         // For now, simulate successful verification
         1 // return true
     }
-    
+
     /// Set up execution environment for Nucleus
     fn setup_nucleus_environment() {
         // Set up memory map, stack, and system registers
@@ -78,17 +72,17 @@ impl PreNucleusLoader {
         unsafe {
             // Set up stack pointer for Nucleus
             asm!("mov sp, 0x8000", options(nostack));
-            
+
             // Configure system registers for isolated execution
             asm!(
                 "msr sctlr_el1, xzr",
-                "msr ttbr0_el1, xzr", 
+                "msr ttbr0_el1, xzr",
                 "msr ttbr1_el1, xzr",
                 options(nostack)
             );
         }
     }
-    
+
     /// Extract entry point from Nucleus blob
     fn get_nucleus_entry() -> u64 {
         // Nucleus entry point is at offset 0 in the blob
@@ -113,4 +107,5 @@ fn panic(_info: &PanicInfo) -> ! {
 // Ensure the loader is within 2KiB
 #[used]
 #[link_section = ".size_check"]
-static SIZE_CHECK: [u8; 2048 - core::mem::size_of::<PreNucleusLoader>()] = [0; 2048 - core::mem::size_of::<PreNucleusLoader>()];
+static SIZE_CHECK: [u8; 2048 - core::mem::size_of::<PreNucleusLoader>()] =
+    [0; 2048 - core::mem::size_of::<PreNucleusLoader>()];

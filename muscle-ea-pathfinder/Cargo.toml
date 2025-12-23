@@ -18,7 +18,7 @@ sha3 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 thiserror = "1.0"
 smallvec = "1.13"
-derive_more = "1.0"
+derive_more = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]

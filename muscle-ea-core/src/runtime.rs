@@ -2,10 +2,10 @@
 //!
 //! Defines the interface between muscles and the biological runtime environment.
 
-use core::fmt;
 use crate::biology::{SealedBlob, SuccessorKey};
 use crate::error::MuscleError;
-use rand_core::{RngCore, CryptoRng};
+use core::fmt;
+use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
 /// Context provided to muscles during execution
@@ -27,17 +27,17 @@ impl<R: RngCore + CryptoRng> MuscleContext<R> {
             rng,
         }
     }
-    
+
     /// Get the current muscle's sealed blob
     pub fn current_blob(&self) -> &SealedBlob {
         &self.current_blob
     }
-    
+
     /// Get the master key
     pub fn master_key(&self) -> &[u8; 32] {
         &self.master_key
     }
-    
+
     /// Get mutable access to the RNG
     pub fn rng(&mut self) -> &mut R {
         &mut self.rng
@@ -46,7 +46,11 @@ impl<R: RngCore + CryptoRng> MuscleContext<R> {
 
 impl<R: RngCore + CryptoRng> fmt::Debug for MuscleContext<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MuscleContext {{ blob_version: {}, ... }}", self.current_blob.version())
+        write!(
+            f,
+            "MuscleContext {{ blob_version: {}, ... }}",
+            self.current_blob.version()
+        )
     }
 }
 
@@ -88,9 +92,13 @@ impl SuccessorMetadata {
             properties: alloc::collections::BTreeMap::new(),
         }
     }
-    
+
     /// Add a property to the metadata
-    pub fn with_property(mut self, key: alloc::string::String, value: alloc::string::String) -> Self {
+    pub fn with_property(
+        mut self,
+        key: alloc::string::String,
+        value: alloc::string::String,
+    ) -> Self {
         self.properties.insert(key, value);
         self
     }
@@ -102,7 +110,7 @@ pub trait Muscle {
     type PrivateInput;
     /// Type of private output data  
     type PrivateOutput;
-    
+
     /// Execute the muscle with the given context and input
     fn execute(
         &self,
@@ -115,7 +123,7 @@ pub trait Muscle {
 impl<M: Muscle + ?Sized> Muscle for alloc::boxed::Box<M> {
     type PrivateInput = M::PrivateInput;
     type PrivateOutput = M::PrivateOutput;
-    
+
     fn execute(
         &self,
         ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
@@ -128,15 +136,15 @@ impl<M: Muscle + ?Sized> Muscle for alloc::boxed::Box<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
     use crate::biology::MuscleSalt;
+    use rand_core::OsRng;
 
     struct TestMuscle;
-    
+
     impl Muscle for TestMuscle {
         type PrivateInput = alloc::vec::Vec<u8>;
         type PrivateOutput = alloc::vec::Vec<u8>;
-        
+
         fn execute(
             &self,
             _ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
@@ -148,33 +156,34 @@ mod tests {
             })
         }
     }
-    
+
     #[test]
     fn test_muscle_trait_implementation() {
         let muscle = TestMuscle;
         let blob = SealedBlob::new(alloc::vec![], MuscleSalt::new([0; 16]), 1);
         let master_key = [0u8; 32];
         let mut ctx = MuscleContext::new(blob, master_key, OsRng);
-        
+
         let input = alloc::vec![1, 2, 3];
         let result = muscle.execute(&mut ctx, input.clone()).unwrap();
-        
+
         assert_eq!(result.output, input);
         assert!(result.successors.is_empty());
     }
-    
+
     #[test]
     fn test_boxed_muscle() {
-        let muscle: alloc::boxed::Box<dyn Muscle<PrivateInput = alloc::vec::Vec<u8>, PrivateOutput = alloc::vec::Vec<u8>>> = 
-            alloc::boxed::Box::new(TestMuscle);
-            
+        let muscle: alloc::boxed::Box<
+            dyn Muscle<PrivateInput = alloc::vec::Vec<u8>, PrivateOutput = alloc::vec::Vec<u8>>,
+        > = alloc::boxed::Box::new(TestMuscle);
+
         let blob = SealedBlob::new(alloc::vec![], MuscleSalt::new([0; 16]), 1);
         let master_key = [0u8; 32];
         let mut ctx = MuscleContext::new(blob, master_key, OsRng);
-        
+
         let input = alloc::vec![4, 5, 6];
         let result = muscle.execute(&mut ctx, input.clone()).unwrap();
-        
+
         assert_eq!(result.output, input);
     }
 }

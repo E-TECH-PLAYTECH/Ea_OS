@@ -19,8 +19,8 @@ cargo build --release
 cd ..
 
 echo "🔨 Step 2: Compiling nucleus.ea to sealed blob..."
-$COMPILER_DIR/target/release/muscle-compiler \
-    $MUSCLES_DIR/nucleus.ea \
+ $COMPILER_DIR/../target/release/musclec \
+    --input $MUSCLES_DIR/nucleus.ea \
     --target $TARGET \
     --output $BUNDLES_DIR/nucleus.blob \
     --chaos-master $(openssl rand -hex 32)

@@ -279,7 +279,7 @@ impl PersistentAppendLog {
         };
         if let Some(on_disk) = read_metadata_file(&meta_path) {
             if on_disk != current_meta {
-                anyhow::bail!("persistent log metadata mismatch during recovery");
+                return Err(anyhow::anyhow!("persistent log metadata mismatch during recovery").into());
             }
         }
 
@@ -448,7 +448,7 @@ impl AppendLogStorage for PersistentAppendLog {
         let _guard = span.enter();
         let start = std::time::Instant::now();
         let state = self.state.read();
-        let out = state
+        let out: Vec<Envelope> = state
             .entries
             .iter()
             .skip(offset)
@@ -506,12 +506,12 @@ fn read_records(path: &Path) -> Result<Vec<Envelope>, AppendError> {
     let mut items = Vec::new();
     while cursor < buf.len() {
         if cursor + 4 > buf.len() {
-            anyhow::bail!("truncated record length in {}", path.display());
+            return Err(anyhow::anyhow!("truncated record length in {}", path.display()).into());
         }
         let len = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
         if cursor + 32 + len > buf.len() {
-            anyhow::bail!("truncated record body in {}", path.display());
+            return Err(anyhow::anyhow!("truncated record body in {}", path.display()).into());
         }
         let checksum: [u8; 32] = buf[cursor..cursor + 32].try_into().unwrap();
         cursor += 32;
@@ -521,8 +521,8 @@ fn read_records(path: &Path) -> Result<Vec<Envelope>, AppendError> {
         hasher.update(CHECKSUM_DOMAIN);
         hasher.update(payload);
         let digest = hasher.finalize();
-        if digest.as_bytes() != checksum {
-            anyhow::bail!("checksum mismatch in {}", path.display());
+        if *digest.as_bytes() != checksum {
+            return Err(anyhow::anyhow!("checksum mismatch in {}", path.display()).into());
         }
         let env: Envelope =
             bincode::deserialize(payload).context("failed to decode envelope from wal")?;

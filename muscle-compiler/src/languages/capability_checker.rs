@@ -43,9 +43,10 @@ impl CapabilityChecker {
         // Verify no undeclared capability usage
         for used_cap in &self.used_capabilities {
             if !self.declared_capabilities.contains(used_cap) {
-                return Err(CompileError::CapabilityError(
-                    format!("Use of undeclared capability: '{}'", used_cap)
-                ));
+                return Err(CompileError::CapabilityError(format!(
+                    "Use of undeclared capability: '{}'",
+                    used_cap
+                )));
             }
         }
 
@@ -68,14 +69,14 @@ impl CapabilityChecker {
             Event::OnLatticeUpdate { .. } => {
                 if !self.declared_inputs.contains("lattice_stream") {
                     return Err(CompileError::CapabilityError(
-                        "Event 'on_lattice_update' requires 'input lattice_stream'".to_string()
+                        "Event 'on_lattice_update' requires 'input lattice_stream'".to_string(),
                     ));
                 }
             }
             Event::OnBoot => {
                 if !self.declared_inputs.contains("hardware_attestation") {
                     return Err(CompileError::CapabilityError(
-                        "Event 'on_boot' requires 'input hardware_attestation'".to_string()
+                        "Event 'on_boot' requires 'input hardware_attestation'".to_string(),
                     ));
                 }
             }
@@ -153,9 +154,10 @@ impl CapabilityChecker {
                             // Check if it's a method call on declared input
                             if let Some(obj_name) = call.function.split('.').next() {
                                 if !self.declared_inputs.contains(obj_name) {
-                                    return Err(CompileError::CapabilityError(
-                                        format!("Call to undeclared function: '{}'", call.function)
-                                    ));
+                                    return Err(CompileError::CapabilityError(format!(
+                                        "Call to undeclared function: '{}'",
+                                        call.function
+                                    )));
                                 }
                             }
                         }
@@ -169,9 +171,10 @@ impl CapabilityChecker {
             Expression::FieldAccess(access) => {
                 // Verify the object is declared
                 if !self.declared_inputs.contains(&access.object) {
-                    return Err(CompileError::CapabilityError(
-                        format!("Access to undeclared object: '{}'", access.object)
-                    ));
+                    return Err(CompileError::CapabilityError(format!(
+                        "Access to undeclared object: '{}'",
+                        access.object
+                    )));
                 }
             }
             Expression::Binary(bin) => {
@@ -195,14 +198,14 @@ impl CapabilityChecker {
 /// Verify the Three Sacred Rules of muscle.ea
 pub fn verify_sacred_rules(program: &Program) -> Result<(), CompileError> {
     // Rule 1: Append-only - no mutation operations in language by design ✓
-    
+
     // Rule 2: Event-driven - verified by parser structure ✓
-    
+
     // Rule 3: Capability-secure - enforced by CapabilityChecker ✓
-    
+
     // Additional: No polling constructs
     verify_no_polling(program)?;
-    
+
     Ok(())
 }
 
@@ -210,34 +213,35 @@ fn verify_no_polling(program: &Program) -> Result<(), CompileError> {
     // Muscle.ea has no looping constructs by design
     // This is enforced by the grammar - no while, for, loop keywords
     // So we just need to ensure no recursive event emissions that could simulate polling
-    
+
     // Check for potential infinite emission chains
     let mut emitter_events = HashSet::new();
-    
+
     for rule in &program.rules {
         if let Event::OnTimer1Hz = rule.event {
             // Timer events can emit, but that's fine - it's 1Hz bounded
             continue;
         }
-        
+
         for statement in &rule.body {
             if let Statement::Emit(emit_stmt) = statement {
                 emitter_events.insert(emit_stmt.event.clone());
             }
         }
     }
-    
+
     // Simple check: if an event emits itself, that's polling
     for rule in &program.rules {
         if let Event::Custom(event_name) = &rule.event {
             if emitter_events.contains(event_name) {
-                return Err(CompileError::CapabilityError(
-                    format!("Potential polling detected: event '{}' emits itself", event_name)
-                ));
+                return Err(CompileError::CapabilityError(format!(
+                    "Potential polling detected: event '{}' emits itself",
+                    event_name
+                )));
             }
         }
     }
-    
+
     Ok(())
 }
 

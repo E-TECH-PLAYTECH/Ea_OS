@@ -39,10 +39,10 @@ static mut STATE: RefereeState = RefereeState::new();
 fn efi_main(_image: Handle, system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services
     uefi_services::init(&system_table).unwrap_success();
-    
+
     let boot_services = system_table.boot_services();
     let mut uart = Uart::new();
-    
+
     // Initialize UART for logging
     if let Err(e) = uart.init() {
         log(&uart, "ERROR", &format!("UART init failed: {}", e));
@@ -69,7 +69,13 @@ fn efi_main(_image: Handle, system_table: SystemTable<Boot>) -> Status {
         return Status::LOAD_ERROR;
     }
 
-    log(&uart, "INFO", &format!("{} muscles alive — Eä breathes", unsafe { STATE.loaded_count }));
+    log(
+        &uart,
+        "INFO",
+        &format!("{} muscles alive — Eä breathes", unsafe {
+            STATE.loaded_count
+        }),
+    );
 
     // Transfer control to scheduler
     run_scheduler(&mut uart)
@@ -78,7 +84,7 @@ fn efi_main(_image: Handle, system_table: SystemTable<Boot>) -> Status {
 /// Load master key from fixed memory location
 fn load_master_key(_boot_services: &BootServices) -> Result<[u8; 32], &'static str> {
     let key_ptr = 0x9000_0000 as *const u8;
-    
+
     // Verify key header
     let header = unsafe { core::slice::from_raw_parts(key_ptr, 8) };
     if header != b"EaKEYv5" {
@@ -102,11 +108,10 @@ fn load_all_muscles(
 ) -> Result<(), &'static str> {
     for i in 0..N_MUSCLES {
         let muscle_addr = MUSCLE_BUNDLE_BASE + (i * MUSCLE_SIZE) as u64;
-        
+
         // Read muscle blob from memory
-        let blob_data = unsafe {
-            core::slice::from_raw_parts(muscle_addr as *const u8, MUSCLE_SIZE)
-        };
+        let blob_data =
+            unsafe { core::slice::from_raw_parts(muscle_addr as *const u8, MUSCLE_SIZE) };
 
         // Skip empty slots
         if blob_data.iter().all(|&b| b == 0) {
@@ -120,10 +125,18 @@ fn load_all_muscles(
                     STATE.muscles[i] = Some(loaded_muscle);
                     STATE.loaded_count += 1;
                 }
-                log(uart, "INFO", &format!("Muscle '{}' loaded successfully", loaded_muscle.name));
+                log(
+                    uart,
+                    "INFO",
+                    &format!("Muscle '{}' loaded successfully", loaded_muscle.name),
+                );
             }
             Err(e) => {
-                log(uart, "WARN", &format!("Muscle {} failed to load: {:?}", i, e));
+                log(
+                    uart,
+                    "WARN",
+                    &format!("Muscle {} failed to load: {:?}", i, e),
+                );
                 // Continue with other muscles (graceful degradation)
             }
         }
@@ -146,7 +159,7 @@ fn run_scheduler(uart: &mut Uart) -> ! {
     loop {
         // Find next available muscle
         let muscle_idx = current_muscle % N_MUSCLES;
-        
+
         if let Some(muscle) = unsafe { &STATE.muscles[muscle_idx] } {
             execution_count += 1;
 
@@ -162,11 +175,10 @@ fn run_scheduler(uart: &mut Uart) -> ! {
         }
 
         current_muscle += 1;
-        
+
         // Small delay to prevent busyloop
         unsafe {
-            let bs = uefi::table::SystemTable::<uefi::table::Boot>::current()
-                .boot_services();
+            let bs = uefi::table::SystemTable::<uefi::table::Boot>::current().boot_services();
             bs.stall(1000);
         }
     }
@@ -182,7 +194,7 @@ unsafe fn execute_muscle(entry_point: u64) {
         options(noreturn)
     );
 
-    // For x86_64  
+    // For x86_64
     #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
         "call {}",

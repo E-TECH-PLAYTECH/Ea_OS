@@ -1,19 +1,18 @@
-// nucleus.ea — THE ONE TRUE KERNEL
 input lattice_stream<MuscleUpdate>
 input hardware_attestation<DeviceProof>
 input symbiote<SealedBlob>
 
-capability load_muscle(id)
-capability schedule(id, priority)
-capability emit_update(blob)
+capability load_muscle(id: muscle_id) -> ExecutableMuscle
+capability schedule(muscle: ExecutableMuscle, priority: u8)
+capability emit_update(blob: SealedBlob)
 
 rule on_boot:
     verify hardware_attestation
-    verify lattice_root == 0xEA...genesis
-    load_muscle(symbiote_id) -> symbiote
-    schedule(symbiote, 255)
+    verify lattice_root == 0xEA0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+    let symbiote = load_muscle(symbiote_id)
+    schedule(symbiote, priority: 255)
 
-rule on_lattice_update(update):
+rule on_lattice_update(update: MuscleUpdate):
     if symbiote.process(update) -> healing:
         emit_update(healing.blob)
 

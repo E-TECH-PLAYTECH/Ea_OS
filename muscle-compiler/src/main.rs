@@ -1,30 +1,36 @@
-use clap::{App, Arg, ArgMatches};
-use std::path::PathBuf;
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use std::fs;
+use std::path::PathBuf;
 use std::process;
 
 mod ast;
-mod crypto;
-mod parser;
 mod codegen;
+mod crypto;
 mod error;
+mod parser;
 
 // UPDATED: Enhanced modules for full Wizard Stack specification
 mod languages;
-mod codegen::nucleus;
 
-use ast::full_ast::{Program, Declaration};
-use crypto::{encrypt_muscle_blob, generate_chaos_key};
-use parser::PythonParser;
+use ast::full_ast::{Declaration, Program};
+use codegen::{aarch64, nucleus::NucleusCodegen, x86_64};
+use crypto::encrypt_muscle_blob;
 use error::CompileError;
-
-// UPDATED: Import full specification components
+use languages::capability_checker::{verify_sacred_rules, CapabilityChecker};
 use languages::formal_grammar::FormalParser;
-use languages::capability_checker::{CapabilityChecker, verify_sacred_rules};
-use codegen::nucleus::NucleusCodegen;
+use parser::PythonParser;
 
 fn main() {
-    let matches = App::new("Muscle Compiler v5.0 - Wizard Stack")
+    let matches = build_cli().get_matches();
+
+    if let Err(e) = run(&matches) {
+        eprintln!("❌ Error: {}", e);
+        process::exit(1);
+    }
+}
+
+fn build_cli() -> Command {
+    Command::new("Muscle Compiler v5.0 - Wizard Stack")
         .version("5.0.0")
         .author("Eä Foundation")
         .about("Compiles Python NN definitions or Muscle.ea sources to encrypted muscle blobs")
@@ -35,16 +41,16 @@ fn main() {
                 .value_name("FILE")
                 .help("Input Python file (.py) or Nucleus source (.ea)")
                 .required(true)
-                .takes_value(true),
+                .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("output")
                 .short('o')
-                .long("output") 
+                .long("output")
                 .value_name("FILE")
                 .help("Output encrypted blob file")
                 .required(true)
-                .takes_value(true),
+                .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("target")
@@ -53,7 +59,7 @@ fn main() {
                 .value_name("ARCH")
                 .help("Target architecture (aarch64, x86_64, nucleus)")
                 .default_value("aarch64")
-                .takes_value(true),
+                .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("chaos-master")
@@ -61,47 +67,51 @@ fn main() {
                 .value_name("KEY")
                 .help("32-byte hex chaos master key for encryption")
                 .required(true)
-                .takes_value(true),
+                .value_parser(value_parser!(String)),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
-                .help("Enable verbose output"),
+                .help("Enable verbose output")
+                .action(ArgAction::Count),
         )
         .arg(
             Arg::new("verify-only")
                 .long("verify-only")
-                .help("Only verify the source code, don't compile"),
+                .help("Only verify the source code, don't compile")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("dump-ast")
                 .long("dump-ast")
-                .help("Dump the parsed AST for debugging"),
+                .help("Dump the parsed AST for debugging")
+                .action(ArgAction::SetTrue),
         )
-        .get_matches();
-
-    if let Err(e) = run(&matches) {
-        eprintln!("❌ Error: {}", e);
-        process::exit(1);
-    }
 }
 
 fn run(matches: &ArgMatches) -> Result<(), CompileError> {
-    let input_file = matches.value_of("input").unwrap();
-    let output_file = matches.value_of("output").unwrap();
-    let target_arch = matches.value_of("target").unwrap();
-    let chaos_master_hex = matches.value_of("chaos-master").unwrap();
-    let verbose = matches.is_present("verbose");
-    let verify_only = matches.is_present("verify-only");
-    let dump_ast = matches.is_present("dump-ast");
+    let input_file = matches.get_one::<String>("input").unwrap();
+    let output_file = matches.get_one::<String>("output").unwrap();
+    let target_arch = matches.get_one::<String>("target").unwrap();
+    let chaos_master_hex = matches.get_one::<String>("chaos-master").unwrap();
+    let verbose = matches.get_count("verbose") > 0;
+    let verify_only = matches.get_flag("verify-only");
+    let dump_ast = matches.get_flag("dump-ast");
 
     if verbose {
         println!("🔧 Muscle Compiler v5.0 - Wizard Stack Specification");
         println!("   Input: {}", input_file);
         println!("   Output: {}", output_file);
         println!("   Target: {}", target_arch);
-        println!("   Mode: {}", if verify_only { "verify-only" } else { "compile" });
+        println!(
+            "   Mode: {}",
+            if verify_only {
+                "verify-only"
+            } else {
+                "compile"
+            }
+        );
     }
 
     // Parse chaos master key
@@ -110,18 +120,39 @@ fn run(matches: &ArgMatches) -> Result<(), CompileError> {
     // Read input file
     let input_path = PathBuf::from(input_file);
     if !input_path.exists() {
-        return Err(CompileError::IoError(format!("Input file not found: {}", input_file)));
+        return Err(CompileError::IoError(format!(
+            "Input file not found: {}",
+            input_file
+        )));
     }
 
     // UPDATED: Enhanced file type detection with full spec support
-    if input_path.extension().map(|ext| ext == "ea").unwrap_or(false) {
+    if input_path
+        .extension()
+        .map(|ext| ext == "ea")
+        .unwrap_or(false)
+    {
         // Compile .ea source file with full Wizard Stack specification
-        compile_ea_source_full_spec(input_file, output_file, target_arch, &chaos_master, verbose, verify_only, dump_ast)
-    } else if input_path.extension().map(|ext| ext == "py").unwrap_or(false) {
+        compile_ea_source_full_spec(
+            input_file,
+            output_file,
+            target_arch,
+            &chaos_master,
+            verbose,
+            verify_only,
+            dump_ast,
+        )
+    } else if input_path
+        .extension()
+        .map(|ext| ext == "py")
+        .unwrap_or(false)
+    {
         // Compile Python source file (traditional neural network muscle)
         compile_python_source(input_file, output_file, target_arch, &chaos_master, verbose)
     } else {
-        Err(CompileError::IoError("Input file must be .py or .ea extension".to_string()))
+        Err(CompileError::IoError(
+            "Input file must be .py or .ea extension".to_string(),
+        ))
     }
 }
 
@@ -142,14 +173,15 @@ fn compile_ea_source_full_spec(
 
     // Validate target architecture for Nucleus
     if target_arch != "nucleus" && target_arch != "aarch64" {
-        return Err(CompileError::CompileError(
-            format!("Nucleus muscles require aarch64 or nucleus target, got: {}", target_arch)
-        ));
+        return Err(CompileError::CompileError(format!(
+            "Nucleus muscles require aarch64 or nucleus target, got: {}",
+            target_arch
+        )));
     }
 
     // Read and parse .ea source with full EBNF grammar
     let source = fs::read_to_string(input_file)?;
-    
+
     if verbose {
         println!("   📖 Parsing source code ({} bytes)", source.len());
     }
@@ -164,33 +196,35 @@ fn compile_ea_source_full_spec(
         println!("   ✅ Parsed successfully:");
         println!("      - {} declarations", program.declarations.len());
         println!("      - {} rules", program.rules.len());
-        
+
         // Count declaration types
         let mut input_count = 0;
         let mut capability_count = 0;
         let mut const_count = 0;
-        
+
         for decl in &program.declarations {
             match decl {
                 Declaration::Input(_) => input_count += 1,
                 Declaration::Capability(_) => capability_count += 1,
                 Declaration::Const(_) => const_count += 1,
-                Declaration::Metadata(_) => {},
+                Declaration::Metadata(_) => {}
             }
         }
-        
-        println!("      - {} inputs, {} capabilities, {} constants", 
-                 input_count, capability_count, const_count);
+
+        println!(
+            "      - {} inputs, {} capabilities, {} constants",
+            input_count, capability_count, const_count
+        );
     }
 
     // UPDATED: Enhanced security verification
     if verbose {
         println!("   🔒 Verifying capability security...");
     }
-    
+
     let mut capability_checker = CapabilityChecker::new();
     capability_checker.verify_program(&program)?;
-    
+
     if verbose {
         println!("   ✅ Capability security verified");
     }
@@ -199,13 +233,13 @@ fn compile_ea_source_full_spec(
     if verbose {
         println!("   📜 Verifying Sacred Rules of Muscle.ea...");
     }
-    
+
     verify_sacred_rules(&program)?;
-    
+
     if verbose {
         println!("   ✅ Sacred Rules verified:");
         println!("      - Append-only semantics");
-        println!("      - Event-driven architecture"); 
+        println!("      - Event-driven architecture");
         println!("      - Capability-security enforced");
         println!("      - No polling constructs");
     }
@@ -224,12 +258,13 @@ fn compile_ea_source_full_spec(
 
     if verbose {
         println!("   ✅ Generated machine code: {} bytes", machine_code.len());
-        
+
         // Verify 8KiB size for Nucleus
         if machine_code.len() != 8192 {
-            return Err(CompileError::CodegenError(
-                format!("Nucleus code must be exactly 8192 bytes, got: {}", machine_code.len())
-            ));
+            return Err(CompileError::CodegenError(format!(
+                "Nucleus code must be exactly 8192 bytes, got: {}",
+                machine_code.len()
+            )));
         }
         println!("   📏 Nucleus size verified: 8192 bytes");
     }
@@ -246,14 +281,14 @@ fn compile_ea_source_full_spec(
 
     if verbose {
         println!("   💾 Sealed blob written: {} bytes", sealed_blob.len());
-        
+
         // Show security summary
         println!("   🛡️  Security Summary:");
         println!("      - Capability security: ENFORCED");
         println!("      - Sacred Rules: VERIFIED");
         println!("      - Cryptographic sealing: COMPLETE");
         println!("      - Biological integrity: MAINTAINED");
-        
+
         println!("   📦 Nucleus muscle compilation complete!");
         println!("   🧬 Every valid program is a living cell ✓");
     }
@@ -275,24 +310,30 @@ fn compile_python_source(
 
     // Read and parse Python source
     let source = fs::read_to_string(input_file)?;
-    let ast = PythonParser::parse(&source)?;
+    let python_ast = PythonParser::parse(&source)?;
 
     if verbose {
-        println!("   Parsed neural network with {} weights", ast.weights.len());
-        
+        println!(
+            "   Parsed neural network with {} weights",
+            python_ast.weights.len()
+        );
+
         // Show architecture info if available
-        if let Some(layers) = &ast.metadata.get("layers") {
+        if let Some(layers) = python_ast.metadata().get("layers") {
             println!("   Network architecture: {}", layers);
         }
     }
 
     // Generate machine code based on target architecture
     let machine_code = match target_arch {
-        "aarch64" => codegen::aarch64::generate(&ast),
-        "x86_64" => codegen::x86_64::generate(&ast),
-        _ => return Err(CompileError::CompileError(
-            format!("Unsupported target architecture: {}", target_arch)
-        )),
+        "aarch64" => aarch64::emit(&python_ast.weights),
+        "x86_64" => x86_64::emit(&python_ast.weights),
+        _ => {
+            return Err(CompileError::CompileError(format!(
+                "Unsupported target architecture: {}",
+                target_arch
+            )))
+        }
     }?;
 
     if verbose {
@@ -317,7 +358,7 @@ fn compile_python_source(
 fn parse_chaos_key(hex_str: &str) -> Result<[u8; 32], CompileError> {
     if hex_str.len() != 64 {
         return Err(CompileError::CryptoError(
-            "Chaos master key must be 64 hex characters (32 bytes)".to_string()
+            "Chaos master key must be 64 hex characters (32 bytes)".to_string(),
         ));
     }
 
@@ -366,10 +407,10 @@ rule on_self_integrity_failure:
 
         let temp_file = NamedTempFile::new().unwrap();
         fs::write(temp_file.path(), source).unwrap();
-        
+
         let output_file = NamedTempFile::new().unwrap();
         let chaos_key = [0u8; 32];
-        
+
         let result = compile_ea_source_full_spec(
             temp_file.path().to_str().unwrap(),
             output_file.path().to_str().unwrap(),
@@ -377,11 +418,11 @@ rule on_self_integrity_failure:
             &chaos_key,
             false,
             false,
-            false
+            false,
         );
-        
+
         assert!(result.is_ok());
-        
+
         let output_data = fs::read(output_file.path()).unwrap();
         assert_eq!(output_data.len(), 8256); // Standard sealed blob size
     }
@@ -425,7 +466,7 @@ rule on_boot:
         let valid_key = "a".repeat(64);
         let result = parse_chaos_key(&valid_key);
         assert!(result.is_ok());
-        
+
         let invalid_key = "a".repeat(63);
         let result = parse_chaos_key(&invalid_key);
         assert!(result.is_err());
@@ -443,22 +484,22 @@ rule on_boot:
 
         let temp_file = NamedTempFile::new().unwrap();
         fs::write(temp_file.path(), source).unwrap();
-        
+
         let output_file = NamedTempFile::new().unwrap();
         let chaos_key = [0u8; 32];
-        
+
         let result = compile_ea_source_full_spec(
             temp_file.path().to_str().unwrap(),
             output_file.path().to_str().unwrap(),
             "aarch64",
             &chaos_key,
             false,
-            true,  // verify-only
-            false
+            true, // verify-only
+            false,
         );
-        
+
         assert!(result.is_ok());
-        
+
         // Output file should not exist in verify-only mode
         assert!(!output_file.path().exists());
     }

@@ -1,5 +1,5 @@
 //! Biological primitives and types for the Eä ecosystem
-//! 
+//!
 //! Defines the fundamental biological structures that make up
 //! the cellular architecture of Eä muscles.
 
@@ -7,7 +7,7 @@ use core::fmt;
 use zeroize::Zeroize;
 
 /// Salt for muscle derivation - ensures unique encryption per muscle
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Zeroize)]
+#[derive(Clone, PartialEq, Eq, Hash, Zeroize)]
 #[zeroize(drop)]
 pub struct MuscleSalt([u8; 16]);
 
@@ -16,14 +16,14 @@ impl MuscleSalt {
     pub fn new(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }
-    
+
     /// Generate a random muscle salt
     pub fn random<R: rand_core::RngCore + rand_core::CryptoRng>(rng: &mut R) -> Self {
         let mut bytes = [0u8; 16];
         rng.fill_bytes(&mut bytes);
         Self(bytes)
     }
-    
+
     /// Get the salt as bytes
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
@@ -57,14 +57,18 @@ pub struct SealedBlob {
 impl SealedBlob {
     /// Create a new sealed blob
     pub fn new(payload: alloc::vec::Vec<u8>, salt: MuscleSalt, version: u32) -> Self {
-        Self { payload, salt, version }
+        Self {
+            payload,
+            salt,
+            version,
+        }
     }
-    
+
     /// Get the salt for this blob
     pub fn salt(&self) -> &MuscleSalt {
         &self.salt
     }
-    
+
     /// Get the version
     pub fn version(&self) -> u32 {
         self.version
@@ -73,13 +77,18 @@ impl SealedBlob {
 
 impl fmt::Debug for SealedBlob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SealedBlob {{ version: {}, salt: {}, payload: {} bytes }}", 
-               self.version, hex::encode(self.salt.0), self.payload.len())
+        write!(
+            f,
+            "SealedBlob {{ version: {}, salt: {}, payload: {} bytes }}",
+            self.version,
+            hex::encode(self.salt.0),
+            self.payload.len()
+        )
     }
 }
 
 /// Key for deriving successor muscles
-#[derive(Clone, Copy, PartialEq, Eq, Zeroize)]
+#[derive(Clone, PartialEq, Eq, Zeroize)]
 #[zeroize(drop)]
 pub struct SuccessorKey([u8; 32]);
 
@@ -88,14 +97,14 @@ impl SuccessorKey {
     pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
-    
+
     /// Generate a random successor key
     pub fn random<R: rand_core::RngCore + rand_core::CryptoRng>(rng: &mut R) -> Self {
         let mut bytes = [0u8; 32];
         rng.fill_bytes(&mut bytes);
         Self(bytes)
     }
-    
+
     /// Get the key as bytes
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -123,26 +132,26 @@ mod tests {
     fn test_muscle_salt_operations() {
         let salt1 = MuscleSalt::random(&mut OsRng);
         let salt2 = MuscleSalt::random(&mut OsRng);
-        
+
         assert_ne!(salt1.as_bytes(), salt2.as_bytes());
         assert_eq!(salt1.as_bytes().len(), 16);
     }
-    
+
     #[test]
     fn test_successor_key_operations() {
         let key1 = SuccessorKey::random(&mut OsRng);
         let key2 = SuccessorKey::random(&mut OsRng);
-        
+
         assert_ne!(key1.as_bytes(), key2.as_bytes());
         assert_eq!(key1.as_bytes().len(), 32);
     }
-    
+
     #[test]
     fn test_sealed_blob_creation() {
         let salt = MuscleSalt::random(&mut OsRng);
         let payload = alloc::vec![1, 2, 3, 4, 5];
         let blob = SealedBlob::new(payload.clone(), salt, 1);
-        
+
         assert_eq!(blob.version(), 1);
         assert_eq!(blob.salt(), &salt);
         assert_eq!(blob.payload, payload);

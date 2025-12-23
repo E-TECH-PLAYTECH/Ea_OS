@@ -12,12 +12,12 @@ impl<T: Copy, const N: usize> FixedAllocator<T, N> {
             count: 0,
         }
     }
-    
+
     pub fn allocate(&mut self, item: T) -> Result<(), ()> {
         if self.count >= N {
             return Err(());
         }
-        
+
         for slot in &mut self.buffer {
             if slot.is_none() {
                 *slot = Some(item);
@@ -25,10 +25,10 @@ impl<T: Copy, const N: usize> FixedAllocator<T, N> {
                 return Ok(());
             }
         }
-        
+
         Err(())
     }
-    
+
     pub fn deallocate(&mut self, index: usize) -> Option<T> {
         if index < N {
             if let Some(item) = self.buffer[index].take() {
@@ -38,11 +38,11 @@ impl<T: Copy, const N: usize> FixedAllocator<T, N> {
         }
         None
     }
-    
+
     pub const fn remaining(&self) -> usize {
         N - self.count
     }
-    
+
     pub const fn is_full(&self) -> bool {
         self.count >= N
     }

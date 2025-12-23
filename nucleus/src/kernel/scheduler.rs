@@ -1,4 +1,4 @@
-use crate::{MAX_MUSCLES, NucleusError, Result};
+use crate::{NucleusError, Result, MAX_MUSCLES};
 
 /// Fixed priorities matching Eä design
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,18 +27,18 @@ impl Scheduler {
             current_slot: 0,
         }
     }
-    
+
     /// Schedule a muscle at given priority
     pub fn schedule(&mut self, muscle_slot: usize, priority: Priority) -> Result<()> {
         if muscle_slot >= MAX_MUSCLES {
             return Err(NucleusError::CapacityExceeded);
         }
-        
+
         let priority_val = priority as u8;
         self.schedule[priority_val as usize] = Some(muscle_slot);
         Ok(())
     }
-    
+
     /// Execute next scheduled muscle
     pub fn execute_next(&mut self) {
         // Round-robin within priority levels
@@ -49,10 +49,10 @@ impl Scheduler {
                 break;
             }
         }
-        
+
         self.current_slot = self.current_slot.wrapping_add(1);
     }
-    
+
     /// Execute a specific muscle
     fn execute_muscle(&self, slot: usize) {
         // Muscle execution would happen here

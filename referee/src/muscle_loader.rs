@@ -1,10 +1,10 @@
 // referee/src/muscle_loader.rs
 // Eä Muscle Loader v5.0 — Compatible with v5.0 blob format
 
-use uefi::table::boot::{BootServices, MemoryType, AllocateType};
-use blake3::Hasher;
 use crate::crypto::{self, MuscleSalt};
 use alloc::string::{String, ToString};
+use blake3::Hasher;
+use uefi::table::boot::{AllocateType, BootServices, MemoryType};
 
 /// Parsed muscle blob information
 pub struct LoadedMuscle {
@@ -32,8 +32,8 @@ pub fn load_muscle(
     muscle_index: usize,
 ) -> Result<LoadedMuscle, LoadError> {
     // Parse blob header
-    let (name, arch, sealed_payload) = parse_blob_header(blob_data)
-        .map_err(|_| LoadError::InvalidFormat)?;
+    let (name, arch, sealed_payload) =
+        parse_blob_header(blob_data).map_err(|_| LoadError::InvalidFormat)?;
 
     // Verify architecture compatibility
     if !is_architecture_supported(&arch) {
@@ -44,8 +44,8 @@ pub fn load_muscle(
     let salt = generate_salt(muscle_index, &name);
 
     // Decrypt muscle payload
-    let (decrypted_data, _version) = crypto::open(master_key, &salt, sealed_payload)
-        .map_err(|_| LoadError::DecryptionFailed)?;
+    let (decrypted_data, _version) =
+        crypto::open(master_key, &salt, sealed_payload).map_err(|_| LoadError::DecryptionFailed)?;
 
     // Allocate executable memory for muscle
     let memory_pages = calculate_required_pages(decrypted_data.len());
@@ -98,8 +98,8 @@ fn parse_blob_header(blob: &[u8]) -> Result<(String, String, &[u8]), &'static st
         return Err("invalid name length");
     }
 
-    let name = String::from_utf8(blob[8..8 + name_len].to_vec())
-        .map_err(|_| "invalid utf8 name")?;
+    let name =
+        String::from_utf8(blob[8..8 + name_len].to_vec()).map_err(|_| "invalid utf8 name")?;
 
     let arch = match arch_code {
         1 => "aarch64",
@@ -134,7 +134,7 @@ fn generate_salt(muscle_index: usize, muscle_name: &str) -> MuscleSalt {
     hasher.update(&muscle_index.to_le_bytes());
     hasher.update(muscle_name.as_bytes());
     let hash = hasher.finalize();
-    
+
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&hash.as_bytes()[..16]);
     salt
@@ -160,7 +160,7 @@ mod tests {
         let salt1 = generate_salt(0, "test_muscle");
         let salt2 = generate_salt(0, "test_muscle");
         let salt3 = generate_salt(1, "test_muscle");
-        
+
         // Same index and name should produce same salt
         assert_eq!(salt1, salt2);
         // Different index should produce different salt

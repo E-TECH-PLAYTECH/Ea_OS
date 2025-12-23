@@ -1,8 +1,9 @@
 // muscle-compiler/src/parser.rs
 // Eä Weight Parser v5.0 — Robust Python weight extraction
 
-use regex::Regex;
+use crate::ast::MuscleAst;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -22,10 +23,48 @@ pub enum ParseError {
 /// Neural network weights structure
 #[derive(Debug, Clone, PartialEq)]
 pub struct Weights {
-    pub w1: [[f32; 3]; 4],   // 4x3 input→hidden weights
-    pub b1: [f32; 3],        // 3 hidden biases
-    pub w2: [f32; 3],        // 3x1 hidden→output weights  
-    pub b2: f32,             // output bias
+    pub w1: [[f32; 3]; 4], // 4x3 input→hidden weights
+    pub b1: [f32; 3],      // 3 hidden biases
+    pub w2: [f32; 3],      // 3x1 hidden→output weights
+    pub b2: f32,           // output bias
+}
+
+impl Weights {
+    /// Count the total number of learned floats stored in this structure
+    pub fn len(&self) -> usize {
+        let w1_entries = self.w1.len() * self.w1[0].len();
+        let b1_entries = self.b1.len();
+        let w2_entries = self.w2.len();
+        let b2_entries = 1;
+        w1_entries + b1_entries + w2_entries + b2_entries
+    }
+}
+
+/// Python AST wrapper that exposes metadata and the parsed weights
+pub struct PythonAst {
+    pub muscle_ast: MuscleAst,
+    pub weights: Weights,
+}
+
+impl PythonAst {
+    pub fn metadata(&self) -> &std::collections::HashMap<String, String> {
+        &self.muscle_ast.metadata
+    }
+}
+
+/// Simple parser for Python-defined muscles
+pub struct PythonParser;
+
+impl PythonParser {
+    pub fn parse(source: &str) -> Result<PythonAst, ParseError> {
+        let weights = extract_weights(source)?;
+        let mut muscle_ast = MuscleAst::new("py".to_string());
+        muscle_ast.set_metadata("layers".to_string(), "python".to_string());
+        Ok(PythonAst {
+            muscle_ast,
+            weights,
+        })
+    }
 }
 
 // Regex patterns for parsing Python numpy arrays
@@ -34,16 +73,20 @@ static RE_W1: Lazy<Regex> = Lazy::new(|| {
 });
 
 static RE_B1: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"b1\s*=\s*np\.array\s*\(\s*\[\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^,\]]+)\s*\]\s*\)").unwrap()
+    Regex::new(
+        r"b1\s*=\s*np\.array\s*\(\s*\[\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^,\]]+)\s*\]\s*\)",
+    )
+    .unwrap()
 });
 
 static RE_W2: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"W2\s*=\s*np\.array\s*\(\s*\[\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^,\]]+)\s*\]\s*\)").unwrap()
+    Regex::new(
+        r"W2\s*=\s*np\.array\s*\(\s*\[\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^,\]]+)\s*\]\s*\)",
+    )
+    .unwrap()
 });
 
-static RE_B2: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"b2\s*=\s*([\d\.\-e]+)").unwrap()
-});
+static RE_B2: Lazy<Regex> = Lazy::new(|| Regex::new(r"b2\s*=\s*([\d\.\-e]+)").unwrap());
 
 /// Parse a single f32 value from string
 fn parse_float(s: &str) -> Result<f32, ParseError> {
@@ -97,7 +140,8 @@ pub fn extract_weights(source: &str) -> Result<Weights, ParseError> {
     ];
 
     // Extract b2 (scalar)
-    let b2 = RE_B2.captures(source)
+    let b2 = RE_B2
+        .captures(source)
         .and_then(|caps| parse_float(caps.get(1).unwrap().as_str()).ok())
         .unwrap_or(0.0); // Default to 0.0 if not found
 
@@ -129,12 +173,12 @@ b2 = 0.7
     #[test]
     fn test_extract_weights() {
         let weights = extract_weights(TEST_SOURCE).unwrap();
-        
+
         assert_eq!(weights.w1[0], [0.1, 0.2, 0.3]);
         assert_eq!(weights.w1[1], [0.4, 0.5, 0.6]);
         assert_eq!(weights.w1[2], [0.7, 0.8, 0.9]);
         assert_eq!(weights.w1[3], [1.0, 1.1, 1.2]);
-        
+
         assert_eq!(weights.b1, [0.1, 0.2, 0.3]);
         assert_eq!(weights.w2, [0.4, 0.5, 0.6]);
         assert_eq!(weights.b2, 0.7);

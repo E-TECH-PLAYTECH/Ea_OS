@@ -1,8 +1,8 @@
 //! Policy engine for security decision making
 
-use ea_lattice_ledger::MuscleUpdate;
-use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use ea_lattice_ledger::MuscleUpdate;
 
 /// Security policy action
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl Default for PolicyEngine {
             policies: Vec::new(),
             quarantine_list: BTreeMap::new(),
         };
-        
+
         // Register default policies
         engine.register_default_policies();
         engine
@@ -76,7 +76,7 @@ impl PolicyEngine {
                 return Some(policy.action.clone());
             }
         }
-        
+
         None
     }
 
@@ -169,8 +169,13 @@ mod tests {
 
         let action = engine.evaluate(&update);
         assert!(action.is_some());
-        
-        if let Some(PolicyAction::HealVulnerability { muscle_id, vulnerable_version, .. }) = action {
+
+        if let Some(PolicyAction::HealVulnerability {
+            muscle_id,
+            vulnerable_version,
+            ..
+        }) = action
+        {
             assert_eq!(muscle_id, [0xEA; 32]);
             assert_eq!(vulnerable_version, 42);
         } else {
@@ -182,7 +187,7 @@ mod tests {
     fn test_quarantine() {
         let mut engine = PolicyEngine::default();
         engine.quarantine_muscle([0x42; 32], "Test quarantine");
-        
+
         assert!(engine.should_quarantine([0x42; 32], 1));
         assert!(!engine.should_quarantine([0x43; 32], 1));
     }

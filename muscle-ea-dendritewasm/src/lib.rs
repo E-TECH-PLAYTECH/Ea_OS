@@ -13,19 +13,19 @@ The first true dendritic integrator performing:
 
 extern crate alloc;
 
-use alloc::{vec::Vec, collections::BTreeMap, format, string::String};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::marker::PhantomData;
+use hex;
+use muscle_ea_axonwasm::AxonPulse;
 use muscle_ea_core::{
     biology::*,
-    runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
-    error::MuscleError,
     crypto::MuscleSalt,
+    error::MuscleError,
+    runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
 };
-use muscle_ea_axonwasm::AxonPulse;
+use rand_core::{CryptoRng, RngCore};
 use sha3::{Digest, Sha3_256};
 use zeroize::Zeroizing;
-use rand_core::{RngCore, CryptoRng};
-use hex;
 
 /// DendriteWasmMuscle v1 "Purkinje Cell" — the first true dendritic integrator
 pub struct DendriteWasmMuscle<R: RngCore + CryptoRng = rand_core::OsRng> {
@@ -41,9 +41,9 @@ pub struct DendriteWasmMuscle<R: RngCore + CryptoRng = rand_core::OsRng> {
 impl<R: RngCore + CryptoRng> Default for DendriteWasmMuscle<R> {
     fn default() -> Self {
         Self {
-            max_synapses: 8192,        // Purkinje cells have ~200k spines — we start modest
-            temporal_window: 8,        // 8-cycle recent history
-            learning_rate: 0.01,       // Classic Hebbian α
+            max_synapses: 8192,  // Purkinje cells have ~200k spines — we start modest
+            temporal_window: 8,  // 8-cycle recent history
+            learning_rate: 0.01, // Classic Hebbian α
             _phantom: PhantomData,
         }
     }
@@ -132,7 +132,7 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
     fn load_persistent_weights(&mut self) -> Result<(), MuscleError> {
         // In a real implementation, this would load from:
         // - Previous execution state
-        // - External weight storage  
+        // - External weight storage
         // - Inherited from parent muscle
         // For now, initialize with uniform weights
         for pulse in &self.inputs {
@@ -166,7 +166,11 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
             pattern.update(&tag);
 
             // Spatial weighting with synaptic strength
-            let weight = self.weights.get(&tag).map(|&w| w as f32 / 1000.0).unwrap_or(1.0);
+            let weight = self
+                .weights
+                .get(&tag)
+                .map(|&w| w as f32 / 1000.0)
+                .unwrap_or(1.0);
             let contribution = pulse.intensity as f32 * weight;
             voltage += contribution;
             active_inputs += pulse.intensity;
@@ -180,7 +184,8 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
 
             // Accumulate payload and update activity history
             payload.extend_from_slice(&pulse.payload);
-            self.recent_activity.insert(tag, (self.current_tick, contribution));
+            self.recent_activity
+                .insert(tag, (self.current_tick, contribution));
         }
 
         let pattern_hash = pattern.finalize().into();
@@ -196,16 +201,21 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
     }
 
     /// Emit successors with Hebbian weight updates
-    fn emit_hebbian_successors(&self, pattern_hash: [u8; 32]) -> Result<Vec<MuscleSuccessor>, MuscleError> {
+    fn emit_hebbian_successors(
+        &self,
+        pattern_hash: [u8; 32],
+    ) -> Result<Vec<MuscleSuccessor>, MuscleError> {
         let mut successors = Vec::new();
 
         // Apply Hebbian learning: strengthen weights that contributed
         for (tag, &weight_fixed) in &self.weights {
             let weight = weight_fixed as f32 / 1000.0;
-            
+
             // Check if this synapse was recently active
             if let Some((last_tick, contribution)) = self.recent_activity.get(tag) {
-                if contribution > &0.0 && self.current_tick.saturating_sub(*last_tick) <= self.muscle.temporal_window {
+                if contribution > &0.0
+                    && self.current_tick.saturating_sub(*last_tick) <= self.muscle.temporal_window
+                {
                     // Classic Hebbian rule: Δw = α * pre * post
                     // Simplified: increase weight for active synapses
                     let new_weight = weight + self.muscle.learning_rate;
@@ -220,9 +230,18 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
                         metadata: SuccessorMetadata::new(5, "synaptic_weight".to_string())
                             .with_property("lineage_tag".to_string(), hex::encode(tag))
                             .with_property("weight".to_string(), clamped.to_string())
-                            .with_property("hebbian_delta".to_string(), self.muscle.learning_rate.to_string())
-                            .with_property("pattern_hash".to_string(), hex::encode(&pattern_hash[..8]))
-                            .with_property("integration_count".to_string(), self.integration_count.to_string()),
+                            .with_property(
+                                "hebbian_delta".to_string(),
+                                self.muscle.learning_rate.to_string(),
+                            )
+                            .with_property(
+                                "pattern_hash".to_string(),
+                                hex::encode(&pattern_hash[..8]),
+                            )
+                            .with_property(
+                                "integration_count".to_string(),
+                                self.integration_count.to_string(),
+                            ),
                     });
                 }
             }
@@ -237,8 +256,14 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
             ),
             metadata: SuccessorMetadata::new(5, "dendritic_integrator".to_string())
                 .with_property("synapse_count".to_string(), self.weights.len().to_string())
-                .with_property("learning_rate".to_string(), self.muscle.learning_rate.to_string())
-                .with_property("temporal_window".to_string(), self.muscle.temporal_window.to_string()),
+                .with_property(
+                    "learning_rate".to_string(),
+                    self.muscle.learning_rate.to_string(),
+                )
+                .with_property(
+                    "temporal_window".to_string(),
+                    self.muscle.temporal_window.to_string(),
+                ),
         });
 
         Ok(successors)
@@ -248,8 +273,8 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
     use muscle_ea_axonwasm::AxonPulse;
+    use rand_core::OsRng;
 
     #[test]
     fn test_dendrite_creation() {
@@ -279,16 +304,28 @@ mod tests {
         ];
 
         let result = muscle.execute(&mut ctx, pulses).unwrap();
-        
+
         // Verify integration results
         assert!(result.output.voltage > 0.0, "Voltage should be positive");
         assert!(result.output.active_inputs >= 15, "Should sum intensities");
-        assert!(result.output.payload.len() >= 10, "Should contain both payloads");
-        
+        assert!(
+            result.output.payload.len() >= 10,
+            "Should contain both payloads"
+        );
+
         // Verify Hebbian successors were generated
-        assert!(!result.successors.is_empty(), "Should generate weight successors");
-        assert!(result.successors.iter().any(|s| s.metadata.muscle_type == "synaptic_weight"));
-        assert!(result.successors.iter().any(|s| s.metadata.muscle_type == "dendritic_integrator"));
+        assert!(
+            !result.successors.is_empty(),
+            "Should generate weight successors"
+        );
+        assert!(result
+            .successors
+            .iter()
+            .any(|s| s.metadata.muscle_type == "synaptic_weight"));
+        assert!(result
+            .successors
+            .iter()
+            .any(|s| s.metadata.muscle_type == "dendritic_integrator"));
     }
 
     #[test]
@@ -305,28 +342,37 @@ mod tests {
         let blob = SealedBlob::new(vec![], MuscleSalt::new([0; 16]), 1);
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
 
-        let pulses = vec![
-            AxonPulse {
-                payload: Zeroizing::new(vec![]),
-                intensity: 8,
-                refractory_trace: vec![0xCC; 8], // Consistent tag for testing
-            },
-        ];
+        let pulses = vec![AxonPulse {
+            payload: Zeroizing::new(vec![]),
+            intensity: 8,
+            refractory_trace: vec![0xCC; 8], // Consistent tag for testing
+        }];
 
         let result = muscle.execute(&mut ctx, pulses).unwrap();
-        
+
         // Find the weight update successor
-        let weight_successor = result.successors
+        let weight_successor = result
+            .successors
             .iter()
             .find(|s| s.metadata.muscle_type == "synaptic_weight")
             .expect("Should have weight successor");
 
         // Verify Hebbian properties
-        assert!(weight_successor.metadata.properties.contains_key("hebbian_delta"));
+        assert!(weight_successor
+            .metadata
+            .properties
+            .contains_key("hebbian_delta"));
         assert!(weight_successor.metadata.properties.contains_key("weight"));
-        assert!(weight_successor.metadata.properties.contains_key("lineage_tag"));
-        
-        let delta_str = weight_successor.metadata.properties.get("hebbian_delta").unwrap();
+        assert!(weight_successor
+            .metadata
+            .properties
+            .contains_key("lineage_tag"));
+
+        let delta_str = weight_successor
+            .metadata
+            .properties
+            .get("hebbian_delta")
+            .unwrap();
         let delta: f32 = delta_str.parse().unwrap();
         assert_eq!(delta, 0.1, "Hebbian delta should match learning rate");
     }
@@ -338,30 +384,29 @@ mod tests {
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
 
         // First integration
-        let pulses1 = vec![
-            AxonPulse {
-                payload: Zeroizing::new(vec![]),
-                intensity: 5,
-                refractory_trace: vec![0xDD; 8],
-            },
-        ];
+        let pulses1 = vec![AxonPulse {
+            payload: Zeroizing::new(vec![]),
+            intensity: 5,
+            refractory_trace: vec![0xDD; 8],
+        }];
 
         let result1 = muscle.execute(&mut ctx, pulses1).unwrap();
         let voltage1 = result1.output.voltage;
 
         // Second integration shortly after (within temporal window)
-        let pulses2 = vec![
-            AxonPulse {
-                payload: Zeroizing::new(vec![]),
-                intensity: 5,
-                refractory_trace: vec![0xDD; 8], // Same synapse
-            },
-        ];
+        let pulses2 = vec![AxonPulse {
+            payload: Zeroizing::new(vec![]),
+            intensity: 5,
+            refractory_trace: vec![0xDD; 8], // Same synapse
+        }];
 
         let result2 = muscle.execute(&mut ctx, pulses2).unwrap();
         let voltage2 = result2.output.voltage;
 
         // Second voltage should be higher due to temporal summation
-        assert!(voltage2 > voltage1, "Temporal summation should boost voltage");
+        assert!(
+            voltage2 > voltage1,
+            "Temporal summation should boost voltage"
+        );
     }
 }

@@ -21,17 +21,17 @@ impl SymbioteInterface {
             initialized: false,
         }
     }
-    
+
     pub fn process_update(&mut self, _update: LatticeUpdate) -> Option<HealingAction> {
         // Process update through symbiote logic
         // Simplified for prototype
         if !self.initialized {
             self.initialized = true;
         }
-        
+
         None
     }
-    
+
     pub fn seal_heartbeat(&self, _heartbeat: Heartbeat) -> Option<SealedBlob> {
         // Create sealed blob for heartbeat
         Some(SealedBlob {
@@ -40,7 +40,7 @@ impl SymbioteInterface {
             tag: [0u8; 16],
         })
     }
-    
+
     pub const fn version(&self) -> u32 {
         self.version
     }

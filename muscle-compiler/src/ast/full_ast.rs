@@ -58,7 +58,10 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     OnBoot,
-    OnLatticeUpdate { param_name: String, param_type: Type },
+    OnLatticeUpdate {
+        param_name: String,
+        param_type: Type,
+    },
     OnTimer1Hz,
     OnSelfIntegrityFailure,
     Custom(String),
@@ -234,9 +237,7 @@ impl Literal {
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Literal::Integer(n) => Some(*n),
-            Literal::Hex(hex_str) => {
-                u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).ok()
-            }
+            Literal::Hex(hex_str) => u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).ok(),
             _ => None,
         }
     }
@@ -245,18 +246,21 @@ impl Literal {
 impl Type {
     pub fn size_bytes(&self) -> usize {
         match self {
-            Type::MuscleId => 32,      // 256 bits
-            Type::SealedBlob => 8256,  // Max size
+            Type::MuscleId => 32,     // 256 bits
+            Type::SealedBlob => 8256, // Max size
             Type::DeviceProof => 512,
             Type::ByteArray32 => 32,
             Type::U8 => 1,
             Type::U64 => 8,
-            Type::MuscleUpdate => 128, // Approximate
+            Type::MuscleUpdate => 128,   // Approximate
             Type::ExecutableMuscle => 8, // Handle size
         }
     }
 
     pub fn is_primitive(&self) -> bool {
-        matches!(self, Type::U8 | Type::U64 | Type::MuscleId | Type::ByteArray32)
+        matches!(
+            self,
+            Type::U8 | Type::U64 | Type::MuscleId | Type::ByteArray32
+        )
     }
 }

@@ -16,6 +16,8 @@ thiserror = { version = "1.0", default-features = false, optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 blake3 = { version = "1.5", default-features = false }
 aes-gcm = { version = "0.10", features = ["aes"] }
+hex = "0.4"
+wasmtime = "24.0"
 
 [features]
 default = ["std"]

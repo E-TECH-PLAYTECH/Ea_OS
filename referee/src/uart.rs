@@ -27,23 +27,23 @@ impl Uart {
         unsafe {
             // Disable interrupts
             self.outb(self.base_port + 1, 0x00);
-            
+
             // Enable DLAB for baud rate setting
             self.outb(self.base_port + 3, 0x80);
-            
+
             // Set baud rate divisor (38400 baud)
             self.outb(self.base_port + 0, 0x03);
             self.outb(self.base_port + 1, 0x00);
-            
+
             // 8 bits, no parity, one stop bit
             self.outb(self.base_port + 3, 0x03);
-            
+
             // Enable FIFO, clear them, with 14-byte threshold
             self.outb(self.base_port + 2, 0xC7);
-            
+
             // Enable modem control (RTS/DSR)
             self.outb(self.base_port + 4, 0x0B);
-            
+
             // Enable interrupts
             self.outb(self.base_port + 1, 0x01);
         }

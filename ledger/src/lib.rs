@@ -1,14 +1,14 @@
 //! # Eä Lattice Ledger
-//! 
+//!
 //! Trustless, fixed-size, hash-only global ledger via quadratic residue lattice.
-//! 
+//!
 //! ## Features
 //! - Zero trusted setup (public RSA modulus from π digits)
 //! - Constant-time operations throughout
 //! - No heap allocation, fixed-size types
 //! - Minimal dependencies (only blake3 + core)
 //! - 7.3µs verification on Cortex-A76
-//! 
+//!
 //! ## Security
 //! Security reduces to:
 //! 1. BLAKE3 collision resistance (128-bit security)
@@ -98,8 +98,14 @@ fn load_be_bytes(src: &[u8; 256]) -> BigInt {
     for i in 0..LIMBS {
         let start = (31 - i) * 8;
         out[i] = u64::from_be_bytes([
-            src[start], src[start+1], src[start+2], src[start+3],
-            src[start+4], src[start+5], src[start+6], src[start+7],
+            src[start],
+            src[start + 1],
+            src[start + 2],
+            src[start + 3],
+            src[start + 4],
+            src[start + 5],
+            src[start + 6],
+            src[start + 7],
         ]);
     }
     out
@@ -110,7 +116,7 @@ fn store_be_bytes(n: &BigInt) -> [u8; 256] {
     let mut out = [0u8; 256];
     for i in 0..LIMBS {
         let start = (31 - i) * 8;
-        out[start..start+8].copy_from_slice(&n[i].to_be_bytes());
+        out[start..start + 8].copy_from_slice(&n[i].to_be_bytes());
     }
     out
 }
@@ -119,18 +125,18 @@ fn store_be_bytes(n: &BigInt) -> [u8; 256] {
 fn bigint_sub(a: &BigInt, b: &BigInt) -> (BigInt, bool) {
     let mut result = [0u64; LIMBS];
     let mut borrow: u64 = 0;
-    
+
     for i in 0..LIMBS {
         let a_val = a[i] as DoubleLimb;
         let b_val = b[i] as DoubleLimb;
         let borrow_val = borrow as DoubleLimb;
-        
+
         // Compute: a - b - borrow + 2^64
         let tmp = a_val + (DoubleLimb::MAX - b_val) + 1 - borrow_val;
         result[i] = tmp as Limb;
         borrow = if tmp > DoubleLimb::MAX { 1 } else { 0 };
     }
-    
+
     (result, borrow == 0)
 }
 
@@ -166,7 +172,7 @@ pub fn square_mod_n(x: &[u8; 32]) -> [u8; 256] {
     // Expand 256-bit input to 2048-bit via repetition
     let mut expanded = [0u8; 256];
     for i in 0..8 {
-        expanded[i*32..(i+1)*32].copy_from_slice(x);
+        expanded[i * 32..(i + 1) * 32].copy_from_slice(x);
     }
 
     let a = load_be_bytes(&expanded);
@@ -179,11 +185,11 @@ pub fn square_mod_n(x: &[u8; 32]) -> [u8; 256] {
             if i + j >= 64 {
                 break;
             }
-            let prod = (a[i] as u128) * (a[j] as u128) + (result[i+j] as u128) + carry;
-            result[i+j] = prod as u64;
+            let prod = (a[i] as u128) * (a[j] as u128) + (result[i + j] as u128) + carry;
+            result[i + j] = prod as u64;
             carry = prod >> 64;
         }
-        
+
         // Handle remaining carry
         let mut k = i + LIMBS;
         while carry > 0 && k < 64 {
@@ -197,7 +203,7 @@ pub fn square_mod_n(x: &[u8; 32]) -> [u8; 256] {
     // Extract lower 2048 bits and reduce
     let mut sq = [0u64; LIMBS];
     sq.copy_from_slice(&result[..LIMBS]);
-    
+
     // Handle potential overflow from upper limbs
     for i in LIMBS..64 {
         if result[i] != 0 {
@@ -243,7 +249,7 @@ pub fn qr_prove_membership(target_root: &[u8; 32]) -> QrProof {
     let mut proof = [0u8; 48];
     proof[..32].copy_from_slice(&y);
     proof[32..].copy_from_slice(&challenge[..16]);
-    
+
     proof
 }
 
@@ -255,7 +261,7 @@ pub fn qr_verify_membership(
 ) -> bool {
     let mut y = [0u8; 32];
     y.copy_from_slice(&proof[..32]);
-    
+
     // Recompute y² mod N
     let computed_sq = square_mod_n(&y);
 
@@ -280,13 +286,13 @@ pub fn qr_verify_membership(
 // ————————————————————————
 
 /// Generate a new muscle update
-/// 
+///
 /// # Arguments
 /// * `muscle_id` - 32-byte muscle identifier
 /// * `version` - Version number (monotonically increasing)
 /// * `blob` - Sealed muscle blob
 /// * `current_root` - Current lattice root
-/// 
+///
 /// # Returns
 /// * `MuscleUpdate` - Signed update with proof
 pub fn generate_update(
@@ -309,17 +315,14 @@ pub fn generate_update(
 }
 
 /// Verify a muscle update
-/// 
+///
 /// # Arguments
 /// * `current_root` - Current lattice root
 /// * `update` - Muscle update to verify
-/// 
+///
 /// # Returns
 /// * `bool` - True if verification succeeds
-pub fn verify_update(
-    current_root: LatticeRoot,
-    update: &MuscleUpdate,
-) -> bool {
+pub fn verify_update(current_root: LatticeRoot, update: &MuscleUpdate) -> bool {
     let pos = position(&update.muscle_id, update.version);
     let value_hash = commit(&pos, &update.blob);
     let alleged_new_root = xor_32(&current_root, &value_hash);
@@ -339,7 +342,11 @@ pub fn verify_update(
 #[cfg(feature = "std")]
 impl std::fmt::Display for MuscleUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MuscleUpdate(id: {}, version: {})", 
-               hex::encode(self.muscle_id), self.version)
+        write!(
+            f,
+            "MuscleUpdate(id: {}, version: {})",
+            hex::encode(self.muscle_id),
+            self.version
+        )
     }
 }

@@ -1,15 +1,15 @@
 //! Muscle Nucleus - The first true biological kernel
-//! 
+//!
 //! 8 KiB of pure life with fixed-size, capability-based security
 //! and compile-time verified rules.
 
 #![no_std]
 extern crate alloc;
 
-pub mod kernel;
-pub mod rules;
-pub mod memory;
 pub mod integration;
+pub mod kernel;
+pub mod memory;
+pub mod rules;
 
 pub mod syscalls {
     use crate::NucleusError;
@@ -92,7 +92,7 @@ pub mod capability {
         pub fn contains(&self, other: Self) -> bool {
             (self.0 & other.0) == other.0
         }
-        
+
         pub fn bits(&self) -> u8 {
             self.0
         }
@@ -114,10 +114,10 @@ pub mod capability {
     }
 }
 
+pub use integration::{HardwareAttestation, LatticeStream, SymbioteInterface};
 pub use kernel::MuscleNucleus;
-pub use rules::{RuleEngine, RuleId};
 pub use memory::FixedAllocator;
-pub use integration::{LatticeStream, HardwareAttestation, SymbioteInterface};
+pub use rules::{RuleEngine, RuleId};
 
 /// Core error types for the nucleus
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -9,39 +9,39 @@ pub enum MuscleError {
     /// Cryptographic operation failed
     #[error("cryptographic operation failed: {0}")]
     Crypto(String),
-    
+
     /// Muscle blob is invalid or tampered with
     #[error("invalid or tampered muscle blob")]
     InvalidBlob,
-    
+
     /// Resource limits exceeded
     #[error("resource limits exceeded")]
     ResourceExhausted,
-    
+
     /// Isolation failure - sandbox violation
     #[error("isolation failure")]
     IsolationFailure,
-    
+
     /// Random number generation failed
     #[error("random number generation failed")]
     RngFailure,
-    
+
     /// Muscle is malformed
     #[error("malformed muscle organelle")]
     MalformedOrganelle,
-    
+
     /// Missing entry point
     #[error("missing entry point")]
     MissingEntryPoint,
-    
+
     /// WebAssembly trap occurred
     #[error("wasm trap: {0}")]
     Trap(String),
-    
+
     /// I/O error
     #[error("I/O error: {0}")]
     Io(String),
-    
+
     /// Custom error
     #[error("muscle error: {0}")]
     Custom(String),
@@ -69,11 +69,7 @@ impl From<std::io::Error> for MuscleError {
 #[cfg(feature = "std")]
 impl From<wasmtime::Error> for MuscleError {
     fn from(err: wasmtime::Error) -> Self {
-        if err.downcast_ref::<wasmtime::FuelExhausted>().is_some() {
-            MuscleError::ResourceExhausted
-        } else {
-            MuscleError::Trap(err.to_string())
-        }
+        MuscleError::Trap(err.to_string())
     }
 }
 
@@ -95,14 +91,14 @@ mod tests {
     fn test_error_display() {
         let error = MuscleError::InvalidBlob;
         assert_eq!(format!("{}", error), "invalid or tampered muscle blob");
-        
+
         let error = MuscleError::ResourceExhausted;
         assert_eq!(format!("{}", error), "resource limits exceeded");
-        
+
         let error = MuscleError::Custom("test error".to_string());
         assert_eq!(format!("{}", error), "muscle error: test error");
     }
-    
+
     #[test]
     fn test_error_conversions() {
         let utf8_err = core::str::from_utf8(&[0xFF]).unwrap_err();
