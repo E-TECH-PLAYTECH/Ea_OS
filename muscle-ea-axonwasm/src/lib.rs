@@ -13,7 +13,7 @@ The first true streaming neural fiber capable of:
 
 extern crate alloc;
 
-use alloc::{format, string::String, vec::Vec, vec_deque::VecDeque};
+use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::marker::PhantomData;
 use muscle_ea_core::{
     biology::*,
@@ -25,6 +25,17 @@ use muscle_ea_pathfinder::PathfinderMuscle;
 use rand_core::{CryptoRng, RngCore};
 use sha3::{Digest, Sha3_256};
 use zeroize::Zeroizing;
+
+/// Encode bytes to hex string (inline to avoid dependency)
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX_CHARS[(b >> 4) as usize] as char);
+        s.push(HEX_CHARS[(b & 0xf) as usize] as char);
+    }
+    s
+}
 
 /// Incoming neural signal — carries multiple sealed organelles (dendritic input)
 #[derive(Debug, Clone)]
@@ -98,13 +109,13 @@ impl<R: RngCore + CryptoRng> AxonWasmMuscle<R> {
     }
 }
 
-impl<R: RngCore + CryptoRng> Muscle for AxonWasmMuscle<R> {
+impl<R: RngCore + CryptoRng> Muscle<R> for AxonWasmMuscle<R> {
     type PrivateInput = AxonSignal;
     type PrivateOutput = AxonPulse;
 
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         signal: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
         let mut axon = AxonFiber::new(self, ctx, signal)?;
@@ -117,19 +128,19 @@ impl<R: RngCore + CryptoRng> Muscle for AxonWasmMuscle<R> {
 }
 
 /// The living axon fiber — contains execution state and propagation logic
-struct AxonFiber<'a, R: RngCore + CryptoRng> {
+struct AxonFiber<'a, R: RngCore + CryptoRng, R2: RngCore + CryptoRng> {
     muscle: &'a AxonWasmMuscle<R>,
-    ctx: &'a mut MuscleContext<impl RngCore + CryptoRng>,
+    ctx: &'a mut MuscleContext<R2>,
     incoming: AxonSignal,
     fired_organelles: VecDeque<MuscleOutput<Vec<u8>>>,
     successors: Vec<MuscleSuccessor>,
     fuel_remaining: u64,
 }
 
-impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
+impl<'a, R: RngCore + CryptoRng, R2: RngCore + CryptoRng> AxonFiber<'a, R, R2> {
     fn new(
         muscle: &'a AxonWasmMuscle<R>,
-        ctx: &'a mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &'a mut MuscleContext<R2>,
         signal: AxonSignal,
     ) -> Result<Self, MuscleError> {
         Ok(Self {
@@ -145,8 +156,6 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
     /// Propagate the action potential — synchronous parallel organelle execution
     fn propagate(&mut self) -> Result<AxonPulse, MuscleError> {
         // Execute organelles with limited parallelism (synaptic firing)
-        let mut executing = Vec::with_capacity(self.muscle.max_parallelism);
-
         for blob in self
             .incoming
             .organelles
@@ -174,16 +183,13 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
 
     /// Fire a single organelle synchronously (synaptic terminal)
     fn fire_organelle_sync(&self, blob: &SealedBlob) -> Result<MuscleOutput<Vec<u8>>, MuscleError> {
-        let pathfinder = PathfinderMuscle::default();
+        let pathfinder = PathfinderMuscle::<rand_core::OsRng>::default();
 
-        // Create execution context for this organelle
+        // Create execution context for this organelle with fresh entropy source
         let mut organelle_ctx = MuscleContext::new(
             blob.clone(),
             *self.ctx.master_key(),
-            self.ctx
-                .rng()
-                .try_clone()
-                .map_err(|_| MuscleError::RngFailure)?,
+            rand_core::OsRng,
         );
 
         pathfinder.execute(&mut organelle_ctx, Vec::new())
@@ -240,7 +246,7 @@ impl<'a, R: RngCore + CryptoRng> AxonFiber<'a, R> {
                     )
                     .with_property(
                         "lineage".to_string(),
-                        hex::encode(self.incoming.metadata.lineage_tag),
+                        encode_hex(&self.incoming.metadata.lineage_tag),
                     ),
             };
             successors.push(continuation);

@@ -49,7 +49,8 @@ impl LanguageFrontend {
         use crate::ast::full_ast::*;
         use crate::parser::PythonParser;
 
-        let python_ast = PythonParser::parse(source)?;
+        let python_ast = PythonParser::parse(source)
+            .map_err(|e| crate::error::CompileError::SyntaxError(e.to_string()))?;
 
         // Convert Python NN AST to Muscle.ea program structure
         let mut declarations = Vec::new();
@@ -218,6 +219,7 @@ rule on_boot:
     fn test_ea_validation() {
         let valid_ea_source = r#"
 input lattice_stream<MuscleUpdate>
+input hardware_attestation<DeviceProof>
 capability emit_update(blob: SealedBlob)
 
 rule on_boot:

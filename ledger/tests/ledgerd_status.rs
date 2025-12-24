@@ -1,7 +1,7 @@
-use assert_cmd::cargo::CommandCargoExt;
+use assert_cmd::cargo::cargo_bin;
 use std::fs::File;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -55,7 +55,7 @@ fn metrics_and_health_endpoints_respond() -> Result<(), Box<dyn std::error::Erro
     let status_port = available_status_port();
 
     // Start daemon bound to the Unix socket.
-    let mut daemon = assert_cmd::Command::cargo_bin("ledgerd")?
+    let mut daemon = Command::new(cargo_bin("ledgerd"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .arg("--transport")

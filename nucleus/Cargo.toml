@@ -6,9 +6,11 @@ authors = ["Eä Foundation"]
 edition = "2021"
 
 [features]
-default = []
+default = ["std"]  # Default to std for testing
 std = []
 no_std = []
+# Enable bare-metal binary build
+bare-metal = []
 
 [dependencies]
 ea-ledger = { package = "ea-lattice-ledger", path = "../ledger" }
@@ -23,6 +25,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "nucleus"
 path = "src/main.rs"
+# Bare-metal binary requires explicit feature
+required-features = ["bare-metal"]
 
 [profile.dev]
 panic = "abort"

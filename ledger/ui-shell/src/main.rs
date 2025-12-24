@@ -10,6 +10,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+/// Read and parse a JSON file into a serde_json::Value
+async fn read_json(path: &Path) -> Result<serde_json::Value> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("reading file {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing JSON from {}", path.display()))?;
+    Ok(value)
+}
 use blake3::Hasher;
 use clap::{Parser, Subcommand, ValueEnum};
 use ledger_core::{AppendLog, MerkleReceipt};

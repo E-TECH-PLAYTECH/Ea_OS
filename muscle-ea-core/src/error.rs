@@ -1,6 +1,5 @@
 //! Error types for the Eä muscle ecosystem
 
-use core::fmt;
 use thiserror::Error;
 
 /// Main error type for muscle operations

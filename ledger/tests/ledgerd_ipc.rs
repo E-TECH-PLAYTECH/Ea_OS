@@ -1,7 +1,7 @@
-use assert_cmd::cargo::CommandCargoExt;
+use assert_cmd::cargo::cargo_bin;
 use std::fs::File;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -46,13 +46,17 @@ fn daemon_append_and_read_share_ipc_log() -> Result<(), Box<dyn std::error::Erro
     serde_json::to_writer(&mut env_file, &env)?;
 
     // Start daemon bound to the Unix socket.
-    let mut daemon = assert_cmd::Command::cargo_bin("ledgerd")?
+    // Use a random port for metrics/status to avoid conflicts with other tests.
+    let status_port = portpicker::pick_unused_port().unwrap_or(19090);
+    let mut daemon = Command::new(cargo_bin("ledgerd"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .arg("--transport")
         .arg("unix")
         .arg("--unix-path")
         .arg(&socket_path)
+        .arg("--status-addr")
+        .arg(format!("127.0.0.1:{}", status_port))
         .arg("--registry")
         .arg(&registry_path)
         .arg("daemon")
@@ -61,7 +65,15 @@ fn daemon_append_and_read_share_ipc_log() -> Result<(), Box<dyn std::error::Erro
         .spawn()?;
 
     // Give the daemon a moment to bind the socket.
-    thread::sleep(Duration::from_millis(500));
+    // Wait up to 2 seconds for the socket to be created.
+    for _ in 0..20 {
+        if socket_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    // Extra time for daemon to be fully ready after socket creation.
+    thread::sleep(Duration::from_millis(200));
 
     // Append via CLI.
     assert_cmd::Command::cargo_bin("ledgerd")?

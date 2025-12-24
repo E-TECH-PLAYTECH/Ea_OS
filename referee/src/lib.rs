@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(all(not(test), not(feature = "std")), no_std)]
 
 extern crate alloc;
 
@@ -7,8 +7,13 @@ pub mod errors;
 pub mod muscle_loader;
 pub mod uart;
 
-// Panic handler for cdylib target (no_std)
-#[cfg(not(test))]
+// Panic handler for no_std builds only (UEFI target, not test, not std feature)
+// Only enabled when building as the final target, not as a dependency
+#[cfg(all(
+    not(test),
+    not(feature = "std"),
+    target_os = "uefi"
+))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

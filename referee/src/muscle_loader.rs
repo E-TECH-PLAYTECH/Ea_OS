@@ -4,6 +4,8 @@
 use crate::crypto::{self, MuscleSalt};
 use alloc::string::{String, ToString};
 use blake3::Hasher;
+
+#[cfg(feature = "uefi-runtime")]
 use uefi::table::boot::{AllocateType, BootServices, MemoryType};
 
 /// Parsed muscle blob information
@@ -24,7 +26,8 @@ pub enum LoadError {
     DecryptionFailed,
 }
 
-/// Load and validate a muscle blob from memory
+/// Load and validate a muscle blob from memory (UEFI runtime only)
+#[cfg(feature = "uefi-runtime")]
 pub fn load_muscle(
     boot_services: &BootServices,
     master_key: &[u8; 32],
@@ -129,7 +132,7 @@ fn parse_blob_header(blob: &[u8]) -> Result<(String, String, &[u8]), &'static st
 }
 
 /// Generate salt for key derivation
-fn generate_salt(muscle_index: usize, muscle_name: &str) -> MuscleSalt {
+pub fn generate_salt(muscle_index: usize, muscle_name: &str) -> MuscleSalt {
     let mut hasher = Hasher::new();
     hasher.update(&muscle_index.to_le_bytes());
     hasher.update(muscle_name.as_bytes());
@@ -147,7 +150,7 @@ fn is_architecture_supported(arch: &str) -> bool {
 }
 
 /// Calculate required pages for muscle
-fn calculate_required_pages(size: usize) -> usize {
+pub fn calculate_required_pages(size: usize) -> usize {
     (size + 4095) / 4096
 }
 

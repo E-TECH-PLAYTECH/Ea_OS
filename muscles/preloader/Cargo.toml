@@ -9,6 +9,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 name = "preloader"
 path = "src/lib.rs"
+# Bare-metal loader can't be tested on regular OS
+test = false
+doctest = false
+bench = false
 
 [dependencies]
 

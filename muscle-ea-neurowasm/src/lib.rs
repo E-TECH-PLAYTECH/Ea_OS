@@ -4,27 +4,25 @@
 #![doc = r#"
 NeuroWasmMuscle — first true hybrid organ of the Eä lineage.
 
-Native Eä bytecode interpreter fused with living WASM organelles 
+Native Eä bytecode interpreter fused with living WASM organelles
 for hyper-adaptive computation. Represents the evolutionary bridge
 between pure biological computing and specialized organelle execution.
 "#]
 
 extern crate alloc;
 
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::marker::PhantomData;
+use core::num::NonZeroUsize;
 use lru::LruCache;
 use muscle_ea_core::{
     biology::*,
     error::MuscleError,
-    prelude::*,
     runtime::{Muscle, MuscleContext, MuscleOutput, MuscleSuccessor, SuccessorMetadata},
 };
 use muscle_ea_pathfinder::PathfinderMuscle;
-use once_cell::sync::OnceCell;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, OsRng, RngCore};
 use sha3::{Digest, Sha3_256};
-use wasmtime::*;
 use zeroize::Zeroizing;
 
 /// Execution modes for the NeuroWasm hybrid organ
@@ -33,7 +31,7 @@ use zeroize::Zeroizing;
 pub enum NeuroMode {
     /// Pure Eä bytecode execution - baseline biological computation
     PureEä = 0,
-    /// Pure WASM execution - specialized organelle function  
+    /// Pure WASM execution - specialized organelle function
     PureWasm = 1,
     /// Hybrid fusion - symbiotic execution with organelle spawning
     Hybrid = 0xFF,
@@ -71,49 +69,48 @@ pub struct NeuroHeader {
 }
 
 /// The first true hybrid organ — NeuroWasmMuscle v1 "Thalamus"
-pub struct NeuroWasmMuscle<R: RngCore + CryptoRng = rand_core::OsRng> {
+pub struct NeuroWasmMuscle<R: RngCore + CryptoRng = OsRng> {
     _phantom: PhantomData<R>,
     /// Cache of interpreted Eä bytecode results (biological computation memory)
-    interpretation_cache: OnceCell<LruCache<[u8; 32], Vec<u8>>>,
+    interpretation_cache: parking_lot::Mutex<LruCache<[u8; 32], Vec<u8>>>,
 }
 
 impl<R: RngCore + CryptoRng> Default for NeuroWasmMuscle<R> {
     fn default() -> Self {
         Self {
             _phantom: PhantomData,
-            interpretation_cache: OnceCell::new(),
+            interpretation_cache: parking_lot::Mutex::new(LruCache::new(
+                NonZeroUsize::new(64).unwrap(),
+            )),
         }
     }
 }
 
-impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
-    fn get_cache(&self) -> &LruCache<[u8; 32], Vec<u8>> {
-        self.interpretation_cache
-            .get_or_init(|| LruCache::new(64.try_into().unwrap()))
-    }
-}
-
-impl<R: RngCore + CryptoRng> Muscle for NeuroWasmMuscle<R> {
+impl<R: RngCore + CryptoRng> Muscle<R> for NeuroWasmMuscle<R> {
     type PrivateInput = Vec<u8>;
     type PrivateOutput = Vec<u8>;
 
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         private_input: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
-        let blob = ctx.current_blob();
-        let header = parse_neurowasm_header(&blob.payload)?;
+        // Clone what we need from ctx before mutable operations
+        let blob_payload = ctx.current_blob().payload.clone();
+        let blob_salt = ctx.current_blob().salt().clone();
+        let master_key = *ctx.master_key();
+
+        let header = parse_neurowasm_header(&blob_payload)?;
 
         match header.mode {
             NeuroMode::PureEä => {
-                self.execute_native_eä(&blob.payload, &private_input, ctx, &header)
+                self.execute_native_eä(&blob_payload, &private_input, ctx, &header)
             }
             NeuroMode::PureWasm => {
-                self.delegate_to_pathfinder(&blob.payload, &private_input, ctx, &header)
+                self.delegate_to_pathfinder(&blob_payload, &private_input, &blob_salt, &master_key, &header)
             }
             NeuroMode::Hybrid => {
-                self.execute_hybrid_fusion(&blob.payload, &private_input, ctx, &header)
+                self.execute_hybrid_fusion(&blob_payload, &private_input, &header)
             }
         }
     }
@@ -133,20 +130,25 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
             &sealed[core::mem::size_of::<NeuroHeader>()..][..header.eä_code_length as usize];
 
         // Check cache first (biological short-term memory)
-        let code_hash = Sha3_256::digest(eä_code);
-        if let Some(cached) = self.get_cache().get(&code_hash.into()) {
-            return Ok(MuscleOutput {
-                output: cached.clone(),
-                successors: Vec::new(),
-            });
+        let code_hash: [u8; 32] = Sha3_256::digest(eä_code).into();
+        {
+            let mut cache = self.interpretation_cache.lock();
+            if let Some(cached) = cache.get(&code_hash) {
+                return Ok(MuscleOutput {
+                    output: cached.clone(),
+                    successors: Vec::new(),
+                });
+            }
         }
 
         // Interpret Eä bytecode safely
         let result = interpret_eä_bytecode(eä_code, input, ctx)?;
 
         // Cache the result (biological learning)
-        self.get_cache()
-            .put(code_hash.into(), result.output.clone());
+        {
+            let mut cache = self.interpretation_cache.lock();
+            cache.put(code_hash, result.output.clone());
+        }
 
         Ok(result)
     }
@@ -154,34 +156,30 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
     fn delegate_to_pathfinder(
         &self,
         sealed: &[u8],
-        input: &[u8],
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        _input: &[u8],
+        salt: &MuscleSalt,
+        master_key: &[u8; 32],
         header: &NeuroHeader,
     ) -> Result<MuscleOutput<Vec<u8>>, MuscleError> {
         // Pure WASM execution via pathfinder muscle (specialized organelle)
-        let pathfinder = PathfinderMuscle::default();
+        let pathfinder = PathfinderMuscle::<OsRng>::default();
 
         // Create a synthetic blob for pathfinder execution
         let wasm_blob = SealedBlob::new(
             sealed[header.wasm_offset as usize..][..header.wasm_length as usize].to_vec(),
-            *ctx.current_blob().salt(),
+            salt.clone(),
             3, // Pathfinder version
         );
 
-        let mut pathfinder_ctx = MuscleContext::new(
-            wasm_blob,
-            *ctx.master_key(),
-            ctx.rng().try_clone().map_err(|_| MuscleError::RngFailure)?,
-        );
+        let mut pathfinder_ctx = MuscleContext::new(wasm_blob, *master_key, OsRng);
 
-        pathfinder.execute(&mut pathfinder_ctx, input)
+        pathfinder.execute(&mut pathfinder_ctx, Vec::new())
     }
 
     fn execute_hybrid_fusion(
         &self,
         sealed: &[u8],
         input: &[u8],
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
         header: &NeuroHeader,
     ) -> Result<MuscleOutput<Vec<u8>>, MuscleError> {
         // Hybrid symbiotic execution: Eä bytecode + WASM organelles
@@ -190,7 +188,7 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
         let wasm_blob = &sealed[header.wasm_offset as usize..][..header.wasm_length as usize];
 
         // Create hybrid virtual machine for symbiotic execution
-        let mut hybrid_vm = HybridVm::new(wasm_blob.to_vec(), input.to_vec(), ctx)?;
+        let mut hybrid_vm = HybridVm::new(wasm_blob.to_vec(), input.to_vec());
 
         // Interpret Eä bytecode with organelle extension capability
         self.interpret_eä_with_organelles(eä_code, &mut hybrid_vm)?;
@@ -201,7 +199,7 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
     fn interpret_eä_with_organelles(
         &self,
         code: &[u8],
-        vm: &mut HybridVm<impl RngCore + CryptoRng>,
+        vm: &mut HybridVm,
     ) -> Result<(), MuscleError> {
         // Safe interpretation of Eä bytecode with organelle spawning
         let mut pc = 0;
@@ -214,7 +212,7 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
             match opcode {
                 // Standard Eä operations (0x00-0xFE)
                 0x00..=0xFE => {
-                    self.execute_standard_eä_op(opcode, &mut stack, pc)?;
+                    self.execute_standard_eä_op(opcode, &mut stack)?;
                 }
                 // Organelle spawn operation (0xFF)
                 0xFF => {
@@ -230,7 +228,6 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
         &self,
         opcode: u8,
         stack: &mut Vec<u8>,
-        pc: usize,
     ) -> Result<(), MuscleError> {
         // Simplified Eä bytecode interpreter for demonstration
         match opcode {
@@ -241,7 +238,7 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
             // Arithmetic operations
             0x80..=0x8F => {
                 if stack.len() < 2 {
-                    return Err(MuscleError::Custom("stack underflow".to_string()));
+                    return Err(MuscleError::Custom("stack underflow".into()));
                 }
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
@@ -249,38 +246,32 @@ impl<R: RngCore + CryptoRng> NeuroWasmMuscle<R> {
                     0x80 => a.wrapping_add(b),
                     0x81 => a.wrapping_sub(b),
                     0x82 => a.wrapping_mul(b),
-                    _ => return Err(MuscleError::InvalidOpcode),
+                    _ => return Err(MuscleError::Custom(format!("invalid opcode: {:#x}", opcode))),
                 };
                 stack.push(result);
             }
-            _ => return Err(MuscleError::InvalidOpcode),
+            _ => return Err(MuscleError::Custom(format!("unknown opcode: {:#x}", opcode))),
         }
         Ok(())
     }
 }
 
 /// Living bridge between Eä VM and WASM organelles - enables symbiotic execution
-struct HybridVm<R: RngCore + CryptoRng> {
+struct HybridVm {
     input: Vec<u8>,
     output: Zeroizing<Vec<u8>>,
     successors: Vec<MuscleSuccessor>,
     wasm_blob: Vec<u8>,
-    pathfinder_muscle: PathfinderMuscle<R>,
 }
 
-impl<R: RngCore + CryptoRng> HybridVm<R> {
-    fn new(
-        wasm_blob: Vec<u8>,
-        input: Vec<u8>,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
-    ) -> Result<Self, MuscleError> {
-        Ok(Self {
+impl HybridVm {
+    fn new(wasm_blob: Vec<u8>, input: Vec<u8>) -> Self {
+        Self {
             input,
             output: Zeroizing::new(Vec::new()),
             successors: Vec::new(),
             wasm_blob,
-            pathfinder_muscle: PathfinderMuscle::default(),
-        })
+        }
     }
 
     fn spawn_wasm_organelle(&mut self) -> Result<(), MuscleError> {
@@ -289,18 +280,18 @@ impl<R: RngCore + CryptoRng> HybridVm<R> {
         // For now, demonstrate the biological concept
 
         // Simulate organelle execution by processing input through WASM logic
-        let simulated_output = self.process_through_wasm_organelle(&self.input)?;
+        let simulated_output = self.process_through_wasm_organelle(&self.input.clone())?;
         self.output.extend_from_slice(&simulated_output);
 
         // Create successor representing the evolved organelle
         let successor = MuscleSuccessor {
             blob: SealedBlob::new(
                 self.wasm_blob.clone(),
-                MuscleSalt::random(&mut rand::rngs::OsRng),
+                MuscleSalt::random(&mut OsRng),
                 3,
             ),
-            metadata: SuccessorMetadata::new(3, "evolved_organelle".to_string())
-                .with_property("evolution".to_string(), "symbiotic_fusion".to_string()),
+            metadata: SuccessorMetadata::new(3, "evolved_organelle".into())
+                .with_property("evolution".into(), "symbiotic_fusion".into()),
         };
 
         self.successors.push(successor);
@@ -326,8 +317,11 @@ impl<R: RngCore + CryptoRng> HybridVm<R> {
 }
 
 /// Parse NeuroWasm hybrid blob header
+// Wire format: 1 byte mode + 4 x 4 byte u32s = 17 bytes
+const NEURO_HEADER_WIRE_SIZE: usize = 17;
+
 fn parse_neurowasm_header(sealed: &[u8]) -> Result<NeuroHeader, MuscleError> {
-    if sealed.len() < core::mem::size_of::<NeuroHeader>() {
+    if sealed.len() < NEURO_HEADER_WIRE_SIZE {
         return Err(MuscleError::InvalidBlob);
     }
 
@@ -392,17 +386,9 @@ fn interpret_eä_bytecode(
     })
 }
 
-// Add the missing error variant to muscle-ea-core if needed
-impl From<MuscleError> for wasmtime::Error {
-    fn from(err: MuscleError) -> Self {
-        wasmtime::Error::new(err.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
 
     #[test]
     fn test_neuro_mode_conversion() {
@@ -441,16 +427,7 @@ mod tests {
         let wasm_blob = vec![0x01, 0x02, 0x03];
         let input = vec![0x10, 0x20, 0x30];
 
-        let mut vm = HybridVm::<OsRng>::new(
-            wasm_blob,
-            input,
-            &mut MuscleContext::new(
-                SealedBlob::new(vec![], MuscleSalt::new([0; 16]), 1),
-                [0; 32],
-                OsRng,
-            ),
-        )
-        .unwrap();
+        let mut vm = HybridVm::new(wasm_blob, input);
 
         vm.spawn_wasm_organelle().unwrap();
         let result = vm.into_result();

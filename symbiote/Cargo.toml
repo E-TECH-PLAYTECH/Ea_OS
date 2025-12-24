@@ -15,6 +15,7 @@ default = []
 std = []
 test = []
 bench = []
+test-utils = []  # Enables test helpers like process_update_unchecked
 
 [dependencies]
 ea-lattice-ledger = { path = "../ledger", version = "1.0" }
@@ -25,6 +26,7 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 proptest = "1.0"
 criterion = { version = "0.5" }
+ea-symbiote = { path = ".", features = ["test-utils"] }  # Enable test-utils for integration tests
 
 [[bench]]
 name = "symbiote_benchmarks"

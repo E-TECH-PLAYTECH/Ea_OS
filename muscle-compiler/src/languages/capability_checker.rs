@@ -9,14 +9,23 @@ pub struct CapabilityChecker {
     declared_capabilities: HashSet<String>,
     used_capabilities: HashSet<String>,
     declared_inputs: HashSet<String>,
+    builtin_objects: HashSet<String>,
+    local_variables: HashSet<String>,
 }
 
 impl CapabilityChecker {
     pub fn new() -> Self {
+        // Built-in objects that are always available in muscle.ea programs
+        let mut builtin_objects = HashSet::new();
+        builtin_objects.insert("referee".to_string());  // Hardware security module interface
+        builtin_objects.insert("self".to_string());     // Self-reference for muscle identity
+
         Self {
             declared_capabilities: HashSet::new(),
             used_capabilities: HashSet::new(),
             declared_inputs: HashSet::new(),
+            builtin_objects,
+            local_variables: HashSet::new(),
         }
     }
 
@@ -91,18 +100,28 @@ impl CapabilityChecker {
                 self.verify_expression(&stmt.condition)?;
             }
             Statement::Let(stmt) => {
+                // Track the local variable
+                self.local_variables.insert(stmt.name.clone());
                 if let Some(expr) = &stmt.value {
                     self.verify_expression(expr)?;
                 }
             }
             Statement::If(stmt) => {
                 self.verify_expression(&stmt.condition)?;
-                for stmt in &stmt.then_branch {
-                    self.verify_statement(stmt)?;
+                // If there's a binding (e.g., "if condition -> binding:"), track it
+                if let Some(binding_name) = &stmt.binding {
+                    self.local_variables.insert(binding_name.clone());
+                }
+                for s in &stmt.then_branch {
+                    self.verify_statement(s)?;
+                }
+                // Remove the binding after the block (proper scoping)
+                if let Some(binding_name) = &stmt.binding {
+                    self.local_variables.remove(binding_name);
                 }
                 if let Some(else_branch) = &stmt.else_branch {
-                    for stmt in else_branch {
-                        self.verify_statement(stmt)?;
+                    for s in else_branch {
+                        self.verify_statement(s)?;
                     }
                 }
             }
@@ -151,9 +170,12 @@ impl CapabilityChecker {
                     _ => {
                         // Regular function call - verify inputs are declared
                         if !self.declared_inputs.contains(&call.function) {
-                            // Check if it's a method call on declared input
+                            // Check if it's a method call on declared input, local variable, or built-in
                             if let Some(obj_name) = call.function.split('.').next() {
-                                if !self.declared_inputs.contains(obj_name) {
+                                let is_input = self.declared_inputs.contains(obj_name);
+                                let is_local = self.local_variables.contains(obj_name);
+                                let is_builtin = self.builtin_objects.contains(obj_name);
+                                if !is_input && !is_local && !is_builtin {
                                     return Err(CompileError::CapabilityError(format!(
                                         "Call to undeclared function: '{}'",
                                         call.function
@@ -169,8 +191,11 @@ impl CapabilityChecker {
                 }
             }
             Expression::FieldAccess(access) => {
-                // Verify the object is declared
-                if !self.declared_inputs.contains(&access.object) {
+                // Verify the object is declared (input), a local variable, or a built-in
+                let is_input = self.declared_inputs.contains(&access.object);
+                let is_local = self.local_variables.contains(&access.object);
+                let is_builtin = self.builtin_objects.contains(&access.object);
+                if !is_input && !is_local && !is_builtin {
                     return Err(CompileError::CapabilityError(format!(
                         "Access to undeclared object: '{}'",
                         access.object
@@ -248,15 +273,17 @@ fn verify_no_polling(program: &Program) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::languages::FormalParser;
 
     #[test]
     fn test_capability_enforcement() {
         let source = r#"
 input lattice_stream<MuscleUpdate>
+input hardware_attestation<DeviceProof>
 capability emit_update(blob: SealedBlob)
 
 rule on_boot:
-    emit heartbeat("I am alive")  # This should work
+    emit heartbeat("I am alive")
 "#;
 
         let program = FormalParser::parse_program(source).unwrap();

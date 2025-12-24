@@ -1,6 +1,7 @@
 #![cfg(test)]
 
-use nucleus::kernel::capabilities::CapabilitySet;
+// Use re-exported types from kernel module
+use nucleus::kernel::CapabilitySet;
 use nucleus::memory::FixedAllocator;
 
 #[test]

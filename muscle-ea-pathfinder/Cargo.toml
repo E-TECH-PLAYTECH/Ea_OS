@@ -34,3 +34,6 @@ serde = ["dep:serde"]
 
 [dev-dependencies]
 hex-literal = "0.4"
+proptest = "1.4"
+rand = "0.8"
+bytemuck = { version = "1.14", features = ["derive"] }

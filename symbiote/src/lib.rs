@@ -17,17 +17,23 @@
 //!
 //! ## Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use ea_symbiote::{Symbiote, PolicyEngine};
+//! use ea_lattice_ledger::MuscleUpdate;
 //!
-//! let symbiote = Symbiote::new();
-//! let policy_engine = PolicyEngine::default();
+//! let root = [0u8; 32];  // Current lattice root
+//! let symbiote = Symbiote::new(root);
 //!
-//! // Process lattice updates and apply security policies
-//! for update in lattice_updates {
-//!     if let Some(action) = policy_engine.evaluate(&update) {
-//!         symbiote.execute_policy_action(action);
-//!     }
+//! // Process a lattice update
+//! let update = MuscleUpdate {
+//!     muscle_id: [0u8; 32],
+//!     version: 1,
+//!     blob: [0u8; 8256],
+//!     proof: [0u8; 48],
+//! };
+//!
+//! if let Some(action) = symbiote.process_update(&update) {
+//!     symbiote.execute_policy_action(action);
 //! }
 //! ```
 
@@ -71,6 +77,13 @@ impl Symbiote {
         }
 
         // Evaluate against security policies
+        self.policy_engine.evaluate(update)
+    }
+
+    /// Process update without verification (TEST ONLY - bypasses cryptographic checks)
+    /// This should only be used in tests where constructing valid proofs is not feasible.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn process_update_unchecked(&self, update: &MuscleUpdate) -> Option<PolicyAction> {
         self.policy_engine.evaluate(update)
     }
 

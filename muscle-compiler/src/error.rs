@@ -32,8 +32,5 @@ impl From<std::io::Error> for CompileError {
     }
 }
 
-impl From<crate::parser::ParseError> for CompileError {
-    fn from(error: crate::parser::ParseError) -> Self {
-        CompileError::SyntaxError(error.to_string())
-    }
-}
+// Note: ParseError conversion is only available in the binary crate
+// The lib exports only crypto and error for external tests

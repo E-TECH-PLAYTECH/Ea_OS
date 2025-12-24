@@ -185,6 +185,11 @@ impl MuscleNucleus {
         self.update_buffer.remaining() > 0
     }
 
+    /// Check if the kernel has the load_muscle capability (for testing)
+    pub fn has_load_muscle_capability(&self) -> bool {
+        self.capabilities.can_load_muscle()
+    }
+
     /// Check if timer has elapsed (1Hz)
     fn timer_elapsed(&self) -> bool {
         // Simplified - real implementation would use hardware timer

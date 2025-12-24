@@ -7,15 +7,34 @@ description = "Secure UEFI bootloader with v5.0 cryptographic muscle isolation"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-crate-type = ["cdylib"]
+# cdylib is only for UEFI builds, rlib for tests and lib usage
+# Use `--features cdylib` for UEFI build
+crate-type = ["rlib"]
 
+[features]
+default = ["std"]  # Default to std for testing
+std = []
+# Enable cdylib build for UEFI target
+cdylib = []
+# Enable UEFI binary build (use with --target x86_64-unknown-uefi)
+uefi-binary = ["uefi-runtime"]
+# Enable UEFI runtime (allocator, services) - include uefi dependencies
+uefi-runtime = ["dep:uefi", "dep:uefi-services"]
+
+# UEFI binary - only built when targeting UEFI
+# Build with: cargo build --target x86_64-unknown-uefi
+# or: cargo build --target aarch64-unknown-uefi
 [[bin]]
 name = "referee"
 path = "src/main.rs"
+# Require explicit feature to build binary (avoids macOS build issues)
+required-features = ["uefi-binary"]
 
 [dependencies]
-uefi = { version = "0.24", default-features = false, features = ["alloc"] }
-uefi-services = { version = "0.21", default-features = false }
+# UEFI dependencies - optional for testing on regular OS
+uefi = { version = "0.24", default-features = false, features = ["alloc"], optional = true }
+uefi-services = { version = "0.21", default-features = false, optional = true }
+# Core crypto dependencies - always needed
 blake3 = { version = "1.5", default-features = false }
 aes-gcm-siv = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
 subtle = { version = "2.5", default-features = false }
@@ -23,6 +42,10 @@ zeroize = { version = "1.8", default-features = false }
 
 [dev-dependencies]
 proptest = "1.4"
+
+# Force std feature when running tests
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(test)"] }
 
 [package.metadata.uefi]
 output = "referee.efi"

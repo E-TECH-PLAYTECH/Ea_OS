@@ -12,14 +12,13 @@ categories = ["cryptography", "concurrency", "wasm", "emulation"]
 [dependencies]
 muscle-ea-core = { path = "../muscle-ea-core", version = "0.1" }
 muscle-ea-pathfinder = { path = "../muscle-ea-pathfinder", version = "0.1" }
-wasmtime = { version = "24.0", features = ["component-model", "cranelift"] }
 sha3 = "0.10"
 rand_core = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
 thiserror = "1.0"
 smallvec = "1.13"
-lru = "0.12"  # ADDED: Missing dependency
-once_cell = "1.19"  # ADDED: For OnceCell replacement
+lru = "0.12"
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.5"

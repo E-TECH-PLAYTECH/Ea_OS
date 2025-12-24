@@ -150,7 +150,7 @@ mod tests {
     fn test_sealed_blob_creation() {
         let salt = MuscleSalt::random(&mut OsRng);
         let payload = alloc::vec![1, 2, 3, 4, 5];
-        let blob = SealedBlob::new(payload.clone(), salt, 1);
+        let blob = SealedBlob::new(payload.clone(), salt.clone(), 1);
 
         assert_eq!(blob.version(), 1);
         assert_eq!(blob.salt(), &salt);

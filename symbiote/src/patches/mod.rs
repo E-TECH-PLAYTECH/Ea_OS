@@ -96,7 +96,8 @@ mod tests {
 
     #[test]
     fn test_patch_lookup() {
-        let patch_id = blake3::hash(b"patch_cve_2026_01").as_bytes();
+        let hash = blake3::hash(b"patch_cve_2026_01");
+        let patch_id = hash.as_bytes();
         let patch = get_patch(patch_id).unwrap();
         assert_eq!(
             patch.description(),

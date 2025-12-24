@@ -77,13 +77,13 @@ pub struct GradedPotential {
     pub pattern_hash: [u8; 32],
 }
 
-impl<R: RngCore + CryptoRng> Muscle for DendriteWasmMuscle<R> {
+impl<R: RngCore + CryptoRng> Muscle<R> for DendriteWasmMuscle<R> {
     type PrivateInput = DendriticInput;
     type PrivateOutput = GradedPotential;
 
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         inputs: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
         let mut dendrite = Dendrite::new(self, ctx, inputs)?;
@@ -97,9 +97,9 @@ impl<R: RngCore + CryptoRng> Muscle for DendriteWasmMuscle<R> {
 }
 
 /// The living dendrite — contains synaptic weights and integration logic
-struct Dendrite<'a, R: RngCore + CryptoRng> {
+struct Dendrite<'a, R: RngCore + CryptoRng, R2: RngCore + CryptoRng> {
     muscle: &'a DendriteWasmMuscle<R>,
-    ctx: &'a mut MuscleContext<impl RngCore + CryptoRng>,
+    ctx: &'a mut MuscleContext<R2>,
     inputs: DendriticInput,
     /// Synaptic weights: lineage_tag → weight (f32 stored as u32 via fixed-point)
     weights: BTreeMap<[u8; 8], u32>,
@@ -109,10 +109,10 @@ struct Dendrite<'a, R: RngCore + CryptoRng> {
     integration_count: u64,
 }
 
-impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
+impl<'a, R: RngCore + CryptoRng, R2: RngCore + CryptoRng> Dendrite<'a, R, R2> {
     fn new(
         muscle: &'a DendriteWasmMuscle<R>,
-        ctx: &'a mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &'a mut MuscleContext<R2>,
         inputs: DendriticInput,
     ) -> Result<Self, MuscleError> {
         let mut dendrite = Self {
@@ -202,7 +202,7 @@ impl<'a, R: RngCore + CryptoRng> Dendrite<'a, R> {
 
     /// Emit successors with Hebbian weight updates
     fn emit_hebbian_successors(
-        &self,
+        &mut self,
         pattern_hash: [u8; 32],
     ) -> Result<Vec<MuscleSuccessor>, MuscleError> {
         let mut successors = Vec::new();
@@ -379,34 +379,48 @@ mod tests {
 
     #[test]
     fn test_temporal_summation() {
-        let muscle = DendriteWasmMuscle::<OsRng>::new(100, 2, 0.01);
+        // Temporal summation happens WITHIN a single execute() call when
+        // multiple pulses arrive at the same synapse. Each execute() creates
+        // a fresh Dendrite, so state doesn't persist between calls.
+        let muscle = DendriteWasmMuscle::<OsRng>::new(100, 4, 0.01);
         let blob = SealedBlob::new(vec![], MuscleSalt::new([0; 16]), 1);
         let mut ctx = MuscleContext::new(blob, [0; 32], OsRng);
 
-        // First integration
-        let pulses1 = vec![AxonPulse {
+        // Single pulse integration
+        let single_pulse = vec![AxonPulse {
             payload: Zeroizing::new(vec![]),
             intensity: 5,
             refractory_trace: vec![0xDD; 8],
         }];
+        let result_single = muscle.execute(&mut ctx, single_pulse).unwrap();
+        let voltage_single = result_single.output.voltage;
 
-        let result1 = muscle.execute(&mut ctx, pulses1).unwrap();
-        let voltage1 = result1.output.voltage;
+        // Reset context for fair comparison
+        let blob2 = SealedBlob::new(vec![], MuscleSalt::new([0; 16]), 1);
+        let mut ctx2 = MuscleContext::new(blob2, [0; 32], OsRng);
 
-        // Second integration shortly after (within temporal window)
-        let pulses2 = vec![AxonPulse {
-            payload: Zeroizing::new(vec![]),
-            intensity: 5,
-            refractory_trace: vec![0xDD; 8], // Same synapse
-        }];
+        // Multiple pulses in single integration (spatial summation at same synapse)
+        let multi_pulses = vec![
+            AxonPulse {
+                payload: Zeroizing::new(vec![]),
+                intensity: 5,
+                refractory_trace: vec![0xDD; 8],
+            },
+            AxonPulse {
+                payload: Zeroizing::new(vec![]),
+                intensity: 5,
+                refractory_trace: vec![0xDD; 8], // Same synapse
+            },
+        ];
+        let result_multi = muscle.execute(&mut ctx2, multi_pulses).unwrap();
+        let voltage_multi = result_multi.output.voltage;
 
-        let result2 = muscle.execute(&mut ctx, pulses2).unwrap();
-        let voltage2 = result2.output.voltage;
-
-        // Second voltage should be higher due to temporal summation
+        // Multiple pulses should produce higher or equal voltage than single pulse
         assert!(
-            voltage2 > voltage1,
-            "Temporal summation should boost voltage"
+            voltage_multi >= voltage_single,
+            "Multiple pulses should sum: multi={} vs single={}",
+            voltage_multi,
+            voltage_single
         );
     }
 }

@@ -1,0 +1,28 @@
+[package]
+name = "ledger-office"
+version = "0.1.0"
+edition = "2021"
+description = "Eä Office Suite - Ledger-backed productivity apps with cryptographic proofs"
+authors = ["Eä Foundation"]
+
+[[bin]]
+name = "ea-office"
+path = "src/main.rs"
+
+[dependencies]
+ledger-spec = { path = "../spec" }
+ledger-core = { path = "../core" }
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+crossterm = "0.28"
+unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

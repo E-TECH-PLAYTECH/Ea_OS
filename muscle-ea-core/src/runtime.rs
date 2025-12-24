@@ -2,7 +2,7 @@
 //!
 //! Defines the interface between muscles and the biological runtime environment.
 
-use crate::biology::{SealedBlob, SuccessorKey};
+use crate::biology::SealedBlob;
 use crate::error::MuscleError;
 use core::fmt;
 use rand_core::{CryptoRng, RngCore};
@@ -105,28 +105,35 @@ impl SuccessorMetadata {
 }
 
 /// Core trait that all muscles must implement
-pub trait Muscle {
+///
+/// Generic over the RNG type `R` to allow different randomness sources
+/// while maintaining object safety. Use `OsRng` for production and
+/// deterministic RNGs for testing.
+pub trait Muscle<R: RngCore + CryptoRng> {
     /// Type of private input data
     type PrivateInput;
-    /// Type of private output data  
+    /// Type of private output data
     type PrivateOutput;
 
     /// Execute the muscle with the given context and input
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         private_input: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError>;
 }
 
 /// Blanket implementation for boxed muscles
-impl<M: Muscle + ?Sized> Muscle for alloc::boxed::Box<M> {
+///
+/// Allows `Box<dyn Muscle<R, ...>>` to be used as a `Muscle<R>` directly,
+/// enabling dynamic dispatch while preserving the RNG type guarantee.
+impl<R: RngCore + CryptoRng, M: Muscle<R> + ?Sized> Muscle<R> for alloc::boxed::Box<M> {
     type PrivateInput = M::PrivateInput;
     type PrivateOutput = M::PrivateOutput;
 
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         private_input: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
         (**self).execute(ctx, private_input)
@@ -141,13 +148,13 @@ mod tests {
 
     struct TestMuscle;
 
-    impl Muscle for TestMuscle {
+    impl<R: RngCore + CryptoRng> Muscle<R> for TestMuscle {
         type PrivateInput = alloc::vec::Vec<u8>;
         type PrivateOutput = alloc::vec::Vec<u8>;
 
         fn execute(
             &self,
-            _ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+            _ctx: &mut MuscleContext<R>,
             input: Self::PrivateInput,
         ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
             Ok(MuscleOutput {
@@ -173,8 +180,10 @@ mod tests {
 
     #[test]
     fn test_boxed_muscle() {
+        // The Muscle trait is now generic over RNG type, making this object-safe.
+        // By specifying OsRng as the RNG type, we can create a trait object.
         let muscle: alloc::boxed::Box<
-            dyn Muscle<PrivateInput = alloc::vec::Vec<u8>, PrivateOutput = alloc::vec::Vec<u8>>,
+            dyn Muscle<OsRng, PrivateInput = alloc::vec::Vec<u8>, PrivateOutput = alloc::vec::Vec<u8>>,
         > = alloc::boxed::Box::new(TestMuscle);
 
         let blob = SealedBlob::new(alloc::vec![], MuscleSalt::new([0; 16]), 1);

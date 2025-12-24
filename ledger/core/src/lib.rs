@@ -173,6 +173,16 @@ impl AppendLog {
         let leaves: Vec<[u8; 32]> = entries.iter().map(envelope_hash).collect();
         MerkleReceipt::from_leaves(&leaves, index)
     }
+
+    /// Estimate storage usage in bytes (approximate based on entry count).
+    pub fn storage_usage_bytes(&self) -> Option<u64> {
+        let entries = self.entries.read();
+        if entries.is_empty() {
+            return Some(0);
+        }
+        // Rough estimate: ~500 bytes per envelope on average
+        Some((entries.len() as u64) * 500)
+    }
 }
 
 impl AppendLogStorage for AppendLog {
@@ -342,7 +352,8 @@ impl PersistentAppendLog {
 
     fn write_wal(&self, env: &Envelope) -> Result<(), AppendError> {
         let mut wal = self.wal.lock();
-        let bytes = bincode::serialize(env).context("failed to serialize envelope")?;
+        // Use JSON instead of bincode because Envelope contains serde_json::Value
+        let bytes = serde_json::to_vec(env).context("failed to serialize envelope")?;
         let mut hasher = Hasher::new();
         hasher.update(CHECKSUM_DOMAIN);
         hasher.update(&bytes);
@@ -525,7 +536,7 @@ fn read_records(path: &Path) -> Result<Vec<Envelope>, AppendError> {
             return Err(anyhow::anyhow!("checksum mismatch in {}", path.display()).into());
         }
         let env: Envelope =
-            bincode::deserialize(payload).context("failed to decode envelope from wal")?;
+            serde_json::from_slice(payload).context("failed to decode envelope from wal")?;
         items.push(env);
     }
     Ok(items)

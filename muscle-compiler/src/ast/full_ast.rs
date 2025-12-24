@@ -92,6 +92,8 @@ pub struct LetStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
     pub condition: Expression,
+    /// Optional binding variable for pattern-matching syntax: `if condition -> binding:`
+    pub binding: Option<String>,
     pub then_branch: Vec<Statement>,
     pub else_branch: Option<Vec<Statement>>,
 }

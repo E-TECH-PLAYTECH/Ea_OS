@@ -208,7 +208,8 @@ fn log(uart: &mut Uart, level: &str, message: &str) {
     let _ = uart.write_str(&format!("[{}] {}\n", level, message));
 }
 
-#[cfg(not(test))]
+// Panic handler only for UEFI target (not when std is linked)
+#[cfg(all(not(test), target_os = "uefi"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

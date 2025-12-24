@@ -70,13 +70,13 @@ impl<R: RngCore + CryptoRng> Default for PathfinderMuscle<R> {
     }
 }
 
-impl<R: RngCore + CryptoRng> Muscle for PathfinderMuscle<R> {
+impl<R: RngCore + CryptoRng> Muscle<R> for PathfinderMuscle<R> {
     type PrivateInput = Vec<u8>;
     type PrivateOutput = Vec<u8>;
 
     fn execute(
         &self,
-        ctx: &mut MuscleContext<impl RngCore + CryptoRng>,
+        ctx: &mut MuscleContext<R>,
         private_input: Self::PrivateInput,
     ) -> Result<MuscleOutput<Self::PrivateOutput>, MuscleError> {
         let sealed = ctx.current_blob();
@@ -193,7 +193,14 @@ fn unseal_pathfinder_blob(
     }
 
     // Verify MAC using constant-time comparison
-    let expected_mac = compute_pathfinder_hmac(master_key, salt, sealed);
+    // NOTE: MAC was computed over data with zeroed MAC field during seal,
+    // so we must zero out the MAC field before computing the expected MAC
+    let mac_offset = core::mem::size_of_val(&header.version)
+        + core::mem::size_of_val(&header.salt)
+        + core::mem::size_of_val(&header.nonce);
+    let mut sealed_for_mac = sealed.to_vec();
+    sealed_for_mac[mac_offset..mac_offset + 16].fill(0);
+    let expected_mac = compute_pathfinder_hmac(master_key, salt, &sealed_for_mac);
     if expected_mac.ct_eq(&header.mac).unwrap_u8() != 1 {
         return Err(MuscleError::InvalidBlob);
     }

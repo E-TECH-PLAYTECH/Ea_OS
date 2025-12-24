@@ -1,7 +1,7 @@
-use assert_cmd::cargo::CommandCargoExt;
+use assert_cmd::cargo::cargo_bin;
 use std::fs::File;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -46,7 +46,7 @@ fn env_configured_daemon_serves_shared_log() -> Result<(), Box<dyn std::error::E
     serde_json::to_writer(&mut env_file, &env)?;
 
     // Start daemon bound to the Unix socket using environment-driven config.
-    let mut daemon = assert_cmd::Command::cargo_bin("ledgerd")?
+    let mut daemon = Command::new(cargo_bin("ledgerd"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("LEDGER_TRANSPORT", "unix")

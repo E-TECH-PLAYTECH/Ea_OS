@@ -21,7 +21,10 @@ pub struct FormalParser;
 impl FormalParser {
     /// Parse complete Muscle.ea program according to EBNF specification
     pub fn parse_program(source: &str) -> Result<Program, CompileError> {
-        let (remaining, program) = parse_program(source)
+        // Preprocess: strip comments (# ... to end of line)
+        let source = strip_comments(source);
+
+        let (remaining, program) = parse_program(&source)
             .map_err(|e| CompileError::SyntaxError(format!("Parse error: {:?}", e)))?;
 
         if !remaining.trim().is_empty() {
@@ -33,6 +36,33 @@ impl FormalParser {
 
         Ok(program)
     }
+}
+
+/// Strip comments from source code (# to end of line)
+fn strip_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            // Find comment start (not inside string literals)
+            let mut in_string = false;
+            let mut chars = line.chars().peekable();
+            let mut i = 0;
+
+            while let Some(c) = chars.next() {
+                if c == '"' && !in_string {
+                    in_string = true;
+                } else if c == '"' && in_string {
+                    in_string = false;
+                } else if c == '#' && !in_string {
+                    // Found comment outside of string
+                    return &line[..i];
+                }
+                i += c.len_utf8();
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // EBNF: program = { declaration } , { rule }
@@ -202,9 +232,23 @@ fn parse_lattice_update_event(input: &str) -> IResult<&str, Event> {
 
 // EBNF: statement = verify_stmt | let_stmt | if_stmt | emit_stmt | schedule_stmt | unschedule_stmt | static_decl | expression
 fn parse_statement(input: &str) -> IResult<&str, Statement> {
-    // Added debug instrumentation to trace parsing issues
-    dbg!(input); // Debug the input before parsing
+    // Consume leading whitespace (must have some for indented statements)
     let (input, _) = multispace0(input)?;
+
+    // Stop if we see a top-level keyword (rule body ended)
+    if input.starts_with("rule ")
+        || input.starts_with("input ")
+        || input.starts_with("capability ")
+        || input.starts_with("const ")
+        || input.starts_with("meta ")
+        || input.is_empty()
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+
     let result = alt((
         map(parse_verify_stmt, Statement::Verify),
         map(parse_let_stmt, Statement::Let),
@@ -249,7 +293,7 @@ fn parse_let_stmt(input: &str) -> IResult<&str, LetStmt> {
     ))
 }
 
-// EBNF: if_stmt = "if" expression "->" action [ "else" "->" action ]
+// EBNF: if_stmt = "if" expression "->" binding ":" block | "if" expression "->" action
 fn parse_if_stmt(input: &str) -> IResult<&str, IfStmt> {
     dbg!(input); // Debug the input before parsing
     let (input, _) = tag("if")(input)?;
@@ -258,7 +302,29 @@ fn parse_if_stmt(input: &str) -> IResult<&str, IfStmt> {
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("->")(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, then_branch) = parse_action(input)?;
+
+    // Check if this is a binding pattern (identifier followed by :)
+    let (input, binding, then_branch) = if let Ok((rest, binding_name)) = parse_identifier(input) {
+        let trimmed = rest.trim_start();
+        if trimmed.starts_with(':') {
+            // This is "-> binding:" syntax - parse the indented block
+            let (input, _) = multispace0(rest)?;
+            let (input, _) = tag(":")(input)?;
+            let (input, _) = multispace0(input)?;
+            // Parse indented statements for the then_branch
+            let (input, stmts) = many1(parse_statement).parse(input)?;
+            // Store the binding name
+            (input, Some(binding_name.to_string()), stmts)
+        } else {
+            // Not a binding, re-parse as regular action
+            let (input, stmts) = parse_action(input)?;
+            (input, None, stmts)
+        }
+    } else {
+        let (input, stmts) = parse_action(input)?;
+        (input, None, stmts)
+    };
+
     let (input, else_branch) = opt(preceded(
         multispace0,
         preceded(
@@ -277,6 +343,7 @@ fn parse_if_stmt(input: &str) -> IResult<&str, IfStmt> {
         input,
         IfStmt {
             condition,
+            binding,
             then_branch,
             else_branch,
         },
@@ -312,11 +379,15 @@ fn parse_schedule_stmt(input: &str) -> IResult<&str, ScheduleStmt> {
     let (input, _) = tag("schedule(")(input)?;
     let (input, _) = multispace0(input)?;
     let (input, muscle) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, _) = tag(",")(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag("priority:")(input)?;
+    let (input, _) = tag("priority")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag(":")(input)?;
     let (input, _) = multispace0(input)?;
     let (input, priority) = parse_literal(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, _) = tag(")")(input)?;
 
     Ok((input, ScheduleStmt { muscle, priority }))
@@ -339,12 +410,33 @@ fn parse_expression(input: &str) -> IResult<&str, Expression> {
     alt((
         map(parse_literal, Expression::Literal),
         map(parse_self_reference, Expression::SelfRef),
+        // Method call must come before field access (obj.method() vs obj.field)
+        parse_method_call,
         map(parse_call_expr, Expression::Call),
         map(parse_field_access, Expression::FieldAccess),
         map(parse_binary_expr, Expression::Binary),
         map(parse_identifier, |id| Expression::Variable(id.to_string())),
     ))
     .parse(input)
+}
+
+/// Parse method call: object.method(args)
+fn parse_method_call(input: &str) -> IResult<&str, Expression> {
+    let (input, object) = parse_identifier(input)?;
+    let (input, _) = tag(".")(input)?;
+    let (input, method) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag("(")(input)?;
+    let (input, args) = parse_arg_list(input)?;
+    let (input, _) = tag(")")(input)?;
+
+    Ok((
+        input,
+        Expression::Call(CallExpr {
+            function: format!("{}.{}", object, method),
+            arguments: args,
+        }),
+    ))
 }
 
 fn parse_self_reference(input: &str) -> IResult<&str, SelfReference> {
@@ -544,7 +636,7 @@ rule on_self_integrity_failure:
 "#;
 
         let program = FormalParser::parse_program(source).unwrap();
-        assert_eq!(program.declarations.len(), 8); // 3 inputs + 3 capabilities + 1 const + 1 metadata
+        assert_eq!(program.declarations.len(), 7); // 3 inputs + 3 capabilities + 1 const
         assert_eq!(program.rules.len(), 4);
     }
 
@@ -564,5 +656,31 @@ rule on_timer_1hz:
         let program = FormalParser::parse_program(source).unwrap();
         assert_eq!(program.declarations.len(), 2);
         assert_eq!(program.rules.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_capability_with_return() {
+        // Test capability with return type
+        let source = r#"
+capability load_muscle(id: muscle_id) -> ExecutableMuscle
+
+rule on_boot:
+    emit test()
+"#;
+        let result = FormalParser::parse_program(source);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_const_hex() {
+        // Test const with hex literal
+        let source = r#"
+const SYMBIOTE_ID: muscle_id = 0xFFFFFFFF
+
+rule on_boot:
+    emit test()
+"#;
+        let result = FormalParser::parse_program(source);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
     }
 }

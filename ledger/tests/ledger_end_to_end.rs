@@ -6,7 +6,7 @@ use ledger_spec::{
 };
 use rand_core::OsRng;
 
-fn base_envelope(channel: &str, ts: u64) -> Envelope {
+fn base_envelope(channel: &str, ts: u64, prev: Option<[u8; 32]>) -> Envelope {
     let body = EnvelopeBody {
         payload: serde_json::json!({ "ts": ts, "channel": channel }),
         payload_type: Some("e2e".into()),
@@ -16,7 +16,7 @@ fn base_envelope(channel: &str, ts: u64) -> Envelope {
         header: EnvelopeHeader {
             channel: channel.into(),
             version: 1,
-            prev: None,
+            prev,
             body_hash,
             timestamp: ts,
         },
@@ -73,9 +73,10 @@ fn append_validate_checkpoint_and_receipts_across_channels(
     });
 
     let log = AppendLog::new();
+    let mut prev: Option<[u8; 32]> = None;
 
     // Missing attestation should be rejected for channel alpha.
-    let mut invalid_env = base_envelope("alpha", 1);
+    let mut invalid_env = base_envelope("alpha", 1, prev);
     signing::sign_envelope(&mut invalid_env, &signer_alpha);
     let err = log
         .append(invalid_env, &registry)
@@ -84,21 +85,24 @@ fn append_validate_checkpoint_and_receipts_across_channels(
         err,
         AppendError::Validation(ValidationError::MissingAttestations)
     ));
+    // Note: failed append doesn't add to log, so prev stays None
 
     // Append a valid attested envelope for alpha.
-    let mut alpha_env = base_envelope("alpha", 1);
+    let mut alpha_env = base_envelope("alpha", 1, prev);
     attach_attestation(&mut alpha_env, &attester);
     signing::sign_envelope(&mut alpha_env, &signer_alpha);
+    prev = Some(ledger_spec::envelope_hash(&alpha_env));
     log.append(alpha_env, &registry)?;
 
     // Append a multi-signer envelope for beta.
-    let mut beta_env = base_envelope("beta", 2);
+    let mut beta_env = base_envelope("beta", 2, prev);
     signing::sign_envelope(&mut beta_env, &signer_beta_one);
     signing::sign_envelope(&mut beta_env, &signer_beta_two);
+    prev = Some(ledger_spec::envelope_hash(&beta_env));
     log.append(beta_env, &registry)?;
 
     // Append another attested alpha envelope to extend the chain.
-    let mut alpha_env_next = base_envelope("alpha", 3);
+    let mut alpha_env_next = base_envelope("alpha", 3, prev);
     attach_attestation(&mut alpha_env_next, &attester);
     signing::sign_envelope(&mut alpha_env_next, &signer_alpha);
     log.append(alpha_env_next, &registry)?;

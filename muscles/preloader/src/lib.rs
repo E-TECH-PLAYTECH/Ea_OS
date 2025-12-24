@@ -97,6 +97,8 @@ extern "C" fn halt_system() -> ! {
     }
 }
 
+// Panic handler only for bare-metal UEFI target
+#[cfg(target_os = "uefi")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     halt_system()

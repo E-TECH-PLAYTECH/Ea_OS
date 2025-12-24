@@ -4,34 +4,205 @@
 use crate::ast::full_ast::*;
 use crate::error::CompileError;
 
+/// Branch fixup entry - records a branch site that needs patching
+#[derive(Debug, Clone)]
+struct BranchFixup {
+    /// Offset in code where branch instruction starts
+    site: usize,
+    /// Target label name
+    target: String,
+    /// Branch type for encoding
+    kind: BranchKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BranchKind {
+    /// B.cond - 19-bit immediate (bits 5-23)
+    Conditional,
+    /// CBZ/CBNZ - 19-bit immediate (bits 5-23)
+    CompareAndBranch,
+    /// B - 26-bit immediate (bits 0-25)
+    Unconditional,
+    /// BL - 26-bit immediate (bits 0-25)
+    BranchLink,
+}
+
+/// Code builder with position tracking and branch fixups
+struct CodeBuilder {
+    code: Vec<u8>,
+    labels: Vec<(String, usize)>,
+    fixups: Vec<BranchFixup>,
+}
+
+impl CodeBuilder {
+    fn new() -> Self {
+        Self {
+            code: Vec::with_capacity(8192),
+            labels: Vec::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    fn pos(&self) -> usize {
+        self.code.len()
+    }
+
+    fn extend(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+
+    fn label(&mut self, name: &str) {
+        self.labels.push((name.to_string(), self.pos()));
+    }
+
+    fn branch_cond(&mut self, target: &str, base_instr: u32) {
+        self.fixups.push(BranchFixup {
+            site: self.pos(),
+            target: target.to_string(),
+            kind: BranchKind::Conditional,
+        });
+        self.code.extend(&base_instr.to_le_bytes());
+    }
+
+    fn cbz(&mut self, target: &str, reg: u8) {
+        self.fixups.push(BranchFixup {
+            site: self.pos(),
+            target: target.to_string(),
+            kind: BranchKind::CompareAndBranch,
+        });
+        // CBZ Xn: 0xB4000000 | Rt
+        let instr = 0xB4000000u32 | (reg as u32);
+        self.code.extend(&instr.to_le_bytes());
+    }
+
+    fn cbnz(&mut self, target: &str, reg: u8) {
+        self.fixups.push(BranchFixup {
+            site: self.pos(),
+            target: target.to_string(),
+            kind: BranchKind::CompareAndBranch,
+        });
+        // CBNZ Xn: 0xB5000000 | Rt
+        let instr = 0xB5000000u32 | (reg as u32);
+        self.code.extend(&instr.to_le_bytes());
+    }
+
+    fn branch(&mut self, target: &str) {
+        self.fixups.push(BranchFixup {
+            site: self.pos(),
+            target: target.to_string(),
+            kind: BranchKind::Unconditional,
+        });
+        // B: 0x14000000
+        self.code.extend(&0x14000000u32.to_le_bytes());
+    }
+
+    fn branch_link(&mut self, target: &str) {
+        self.fixups.push(BranchFixup {
+            site: self.pos(),
+            target: target.to_string(),
+            kind: BranchKind::BranchLink,
+        });
+        // BL: 0x94000000
+        self.code.extend(&0x94000000u32.to_le_bytes());
+    }
+
+    /// Apply all fixups after code generation is complete
+    fn apply_fixups(&mut self) -> Result<(), CompileError> {
+        for fixup in &self.fixups {
+            let target_pos = self.labels.iter()
+                .find(|(name, _)| name == &fixup.target)
+                .map(|(_, pos)| *pos);
+
+            let target_pos = match target_pos {
+                Some(pos) => pos,
+                None => {
+                    // If target not found, use a forward jump to current position (NOP-like)
+                    // This handles internal function calls that go to stubs
+                    fixup.site + 4
+                }
+            };
+
+            // Calculate offset in instructions (4-byte units), PC-relative from branch site
+            let offset = (target_pos as i64 - fixup.site as i64) / 4;
+
+            let patched = match fixup.kind {
+                BranchKind::Conditional | BranchKind::CompareAndBranch => {
+                    // 19-bit signed immediate in bits 5-23
+                    if offset < -(1 << 18) || offset >= (1 << 18) {
+                        return Err(CompileError::CodegenError(format!(
+                            "Branch offset {} out of 19-bit range", offset
+                        )));
+                    }
+                    let base = u32::from_le_bytes([
+                        self.code[fixup.site],
+                        self.code[fixup.site + 1],
+                        self.code[fixup.site + 2],
+                        self.code[fixup.site + 3],
+                    ]);
+                    let imm19 = ((offset as u32) & 0x7FFFF) << 5;
+                    base | imm19
+                }
+                BranchKind::Unconditional | BranchKind::BranchLink => {
+                    // 26-bit signed immediate in bits 0-25
+                    if offset < -(1 << 25) || offset >= (1 << 25) {
+                        return Err(CompileError::CodegenError(format!(
+                            "Branch offset {} out of 26-bit range", offset
+                        )));
+                    }
+                    let base = u32::from_le_bytes([
+                        self.code[fixup.site],
+                        self.code[fixup.site + 1],
+                        self.code[fixup.site + 2],
+                        self.code[fixup.site + 3],
+                    ]);
+                    let imm26 = (offset as u32) & 0x3FFFFFF;
+                    base | imm26
+                }
+            };
+
+            let bytes = patched.to_le_bytes();
+            self.code[fixup.site..fixup.site + 4].copy_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
+    fn into_code(mut self) -> Result<Vec<u8>, CompileError> {
+        self.apply_fixups()?;
+        Ok(self.code)
+    }
+}
+
 /// Enhanced Nucleus code generator with capability security
 pub struct NucleusCodegen;
 
 impl NucleusCodegen {
     /// Generate 8KiB AArch64 machine code with capability enforcement
     pub fn generate(program: &Program) -> Result<Vec<u8>, CompileError> {
-        let mut code = Vec::with_capacity(8192);
+        let mut builder = CodeBuilder::new();
 
         // 1. Entry point and capability security setup
-        code.extend(Self::generate_security_header());
+        Self::generate_security_header(&mut builder);
 
         // 2. Rule dispatcher with event verification
-        code.extend(Self::generate_rule_dispatcher(&program.rules));
+        Self::generate_rule_dispatcher(&mut builder, &program.rules);
 
         // 3. Capability implementations with runtime checks
-        code.extend(Self::generate_capability_implementations(program));
+        Self::generate_capability_implementations(&mut builder, program);
 
         // 4. Built-in function implementations
-        code.extend(Self::generate_builtin_functions());
+        Self::generate_builtin_functions(&mut builder);
 
         // 5. Event handlers
-        code.extend(Self::generate_event_handlers(&program.rules, program));
+        Self::generate_event_handlers(&mut builder, &program.rules, program);
 
         // 6. Data section with constants and security tokens
-        code.extend(Self::generate_data_section(program));
+        Self::generate_data_section(&mut builder, program);
 
         // 7. Capability security enforcement tables
-        code.extend(Self::generate_capability_tables(program));
+        Self::generate_capability_tables(&mut builder, program);
+
+        // Apply branch fixups
+        let mut code = builder.into_code()?;
 
         // Pad to exactly 8KiB
         if code.len() > 8192 {
@@ -45,521 +216,520 @@ impl NucleusCodegen {
         Ok(code)
     }
 
-    fn generate_security_header() -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_security_header(builder: &mut CodeBuilder) {
+        builder.label("_start");
 
         // Security header: capability enforcement setup
         // MOV X28, #0x1000  ; Capability table base
-        code.extend(&[0x88, 0x0B, 0x80, 0xD2]); // MOV X8, #0x1000
-        code.extend(&[0x1C, 0x01, 0x00, 0x91]); // ADD X28, X8, #0
+        builder.extend(&[0x88, 0x0B, 0x80, 0xD2]); // MOV X8, #0x1000
+        builder.extend(&[0x1C, 0x01, 0x00, 0x91]); // ADD X28, X8, #0
 
         // Initialize security monitor
         // STR XZR, [X28, #0]  ; Clear capability flags
-        code.extend(&[0x9F, 0x03, 0x00, 0xF9]); // STR XZR, [X28, #0]
+        builder.extend(&[0x9F, 0x03, 0x00, 0xF9]); // STR XZR, [X28, #0]
 
         // Set up stack pointer with security boundary
         // MOV SP, #0x8000
-        code.extend(&[0xFF, 0x43, 0x00, 0x91]); // MOV SP, #0x8000
+        builder.extend(&[0xFF, 0x43, 0x00, 0x91]); // MOV SP, #0x8000
 
         // Jump to rule dispatcher
-        // BL rule_dispatcher
-        code.extend(&[0x00, 0x00, 0x00, 0x94]); // BL +0 (rule_dispatcher)
+        builder.branch_link("rule_dispatcher");
 
         // Security violation handler (infinite loop)
-        // security_violation: B .
-        code.extend(&[0x00, 0x00, 0x00, 0x14]); // B .
-
-        code
+        builder.label("security_violation");
+        builder.branch("security_violation"); // B . (self-loop)
     }
 
-    fn generate_rule_dispatcher(rules: &[Rule]) -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_rule_dispatcher(builder: &mut CodeBuilder, rules: &[Rule]) {
+        builder.label("rule_dispatcher");
 
         // rule_dispatcher:
-        code.extend(&[0xFF, 0x83, 0x00, 0xD1]); // SUB SP, SP, #32
-        code.extend(&[0xE0, 0x2F, 0x00, 0xB9]); // STR W0, [SP, #44] ; event_id
-        code.extend(&[0xE1, 0x1B, 0x00, 0xF9]); // STR X1, [SP, #48] ; event_data
+        builder.extend(&[0xFF, 0x83, 0x00, 0xD1]); // SUB SP, SP, #32
+        builder.extend(&[0xE0, 0x2F, 0x00, 0xB9]); // STR W0, [SP, #44] ; event_id
+        builder.extend(&[0xE1, 0x1B, 0x00, 0xF9]); // STR X1, [SP, #48] ; event_data
 
         // Event ID to handler mapping
         for (i, rule) in rules.iter().enumerate() {
             let event_id = Self::event_to_id(&rule.event);
 
-            // CMP W0, #event_id
-            code.extend(&[0x1F, 0x00, 0x00, 0x71]); // CMP W0, #event_id
-                                                    // B.EQ handler_i
-            let branch_offset = code.len();
-            code.extend(&[0x00, 0x00, 0x00, 0x54]); // B.EQ +0 (placeholder)
+            // CMP W0, #event_id - encode immediate in instruction
+            let cmp_instr = 0x7100001F | ((event_id as u32) << 10);
+            builder.extend(&cmp_instr.to_le_bytes());
 
-            // Store patch location for later
-            // In real implementation, we'd track and patch these
+            // B.EQ handler_i
+            let handler_label = format!("handler_{}", i);
+            builder.branch_cond(&handler_label, 0x54000000); // B.EQ base
         }
 
         // Unknown event: return
-        code.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0 (success)
-        code.extend(&[0xFF, 0x83, 0x00, 0x91]); // ADD SP, SP, #32
-        code.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
-
-        code
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0 (success)
+        builder.extend(&[0xFF, 0x83, 0x00, 0x91]); // ADD SP, SP, #32
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
     }
 
-    fn generate_capability_implementations(program: &Program) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_capability_implementations(builder: &mut CodeBuilder, program: &Program) {
         for decl in &program.declarations {
             if let Declaration::Capability(cap) = decl {
-                code.extend(Self::generate_capability_function(cap));
+                Self::generate_capability_function(builder, cap);
             }
         }
-
-        code
     }
 
-    fn generate_capability_function(cap: &CapabilityDecl) -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_capability_function(builder: &mut CodeBuilder, cap: &CapabilityDecl) {
+        // Function label
+        builder.label(&cap.name);
 
         // Function prologue
-        // capability_name:
-        code.extend(&[0xFF, 0x83, 0x00, 0xD1]); // SUB SP, SP, #32
-        code.extend(&[0xFD, 0x7B, 0x01, 0xA9]); // STP X29, X30, [SP, #16]
-        code.extend(&[0xFD, 0x43, 0x00, 0x91]); // ADD X29, SP, #16
+        builder.extend(&[0xFF, 0x83, 0x00, 0xD1]); // SUB SP, SP, #32
+        builder.extend(&[0xFD, 0x7B, 0x01, 0xA9]); // STP X29, X30, [SP, #16]
+        builder.extend(&[0xFD, 0x43, 0x00, 0x91]); // ADD X29, SP, #16
 
         // Capability security check
-        // Check if this capability is authorized
-        code.extend(Self::generate_capability_check(&cap.name));
+        Self::generate_capability_check(builder, &cap.name);
 
         // Parameter handling
-        for (i, param) in cap.parameters.iter().enumerate() {
+        for (i, _param) in cap.parameters.iter().enumerate() {
             if i < 8 {
                 // AArch64 has 8 parameter registers
-                // Store parameter to stack
-                // STR X{i}, [SP, #{i*8}]
-                let store_instr = match i {
-                    0 => vec![0xE0, 0x07, 0x00, 0xF9], // STR X0, [SP, #0]
-                    1 => vec![0xE1, 0x0B, 0x00, 0xF9], // STR X1, [SP, #8]
-                    2 => vec![0xE2, 0x0F, 0x00, 0xF9], // STR X2, [SP, #16]
-                    3 => vec![0xE3, 0x13, 0x00, 0xF9], // STR X3, [SP, #24]
-                    4 => vec![0xE4, 0x17, 0x00, 0xF9], // STR X4, [SP, #32]
-                    5 => vec![0xE5, 0x1B, 0x00, 0xF9], // STR X5, [SP, #40]
-                    6 => vec![0xE6, 0x1F, 0x00, 0xF9], // STR X6, [SP, #48]
-                    7 => vec![0xE7, 0x23, 0x00, 0xF9], // STR X7, [SP, #56]
-                    _ => vec![],
+                // Store parameter to stack: STR X{i}, [SP, #{i*8}]
+                let store_instr: [u8; 4] = match i {
+                    0 => [0xE0, 0x07, 0x00, 0xF9], // STR X0, [SP, #0]
+                    1 => [0xE1, 0x0B, 0x00, 0xF9], // STR X1, [SP, #8]
+                    2 => [0xE2, 0x0F, 0x00, 0xF9], // STR X2, [SP, #16]
+                    3 => [0xE3, 0x13, 0x00, 0xF9], // STR X3, [SP, #24]
+                    4 => [0xE4, 0x17, 0x00, 0xF9], // STR X4, [SP, #32]
+                    5 => [0xE5, 0x1B, 0x00, 0xF9], // STR X5, [SP, #40]
+                    6 => [0xE6, 0x1F, 0x00, 0xF9], // STR X6, [SP, #48]
+                    7 => [0xE7, 0x23, 0x00, 0xF9], // STR X7, [SP, #56]
+                    _ => continue,
                 };
-                code.extend(store_instr);
+                builder.extend(&store_instr);
             }
         }
 
         // Capability-specific implementation
-        code.extend(Self::generate_capability_body(cap));
+        Self::generate_capability_body(builder, cap);
 
         // Function epilogue
-        code.extend(&[0xFD, 0x7B, 0x41, 0xA9]); // LDP X29, X30, [SP, #16]
-        code.extend(&[0xFF, 0x83, 0x00, 0x91]); // ADD SP, SP, #32
-        code.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
-
-        code
+        builder.extend(&[0xFD, 0x7B, 0x41, 0xA9]); // LDP X29, X30, [SP, #16]
+        builder.extend(&[0xFF, 0x83, 0x00, 0x91]); // ADD SP, SP, #32
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
     }
 
-    fn generate_capability_check(cap_name: &str) -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_capability_check(builder: &mut CodeBuilder, cap_name: &str) {
+        let authorized_label = format!("{}_authorized", cap_name);
 
         // Check capability authorization table
         // LDRB W8, [X28, #capability_offset]
         let cap_offset = Self::capability_offset(cap_name);
-        code.extend(&[0x88, 0x03, 0x40, 0x39]); // LDRB W8, [X28, #cap_offset]
+        let ldrb_instr = 0x39400388u32 | ((cap_offset as u32) << 10);
+        builder.extend(&ldrb_instr.to_le_bytes());
 
         // CBNZ W8, authorized
-        code.extend(&[0x68, 0x00, 0x00, 0xB5]); // CBNZ W8, +12
+        builder.cbnz(&authorized_label, 8);
 
         // Unauthorized: jump to security violation
-        code.extend(&[0x00, 0x00, 0x00, 0x14]); // B security_violation
+        builder.branch("security_violation");
 
         // authorized: continue
-        code
+        builder.label(&authorized_label);
     }
 
-    fn generate_capability_body(cap: &CapabilityDecl) -> Vec<u8> {
+    fn generate_capability_body(builder: &mut CodeBuilder, cap: &CapabilityDecl) {
         match cap.name.as_str() {
-            "load_muscle" => Self::generate_load_muscle_body(),
-            "schedule" => Self::generate_schedule_body(),
-            "emit_update" => Self::generate_emit_update_body(),
-            _ => vec![0x00, 0x00, 0x80, 0x52], // MOV W0, #0 (default)
+            "load_muscle" => Self::generate_load_muscle_body(builder),
+            "schedule" => Self::generate_schedule_body(builder),
+            "emit_update" => Self::generate_emit_update_body(builder),
+            _ => builder.extend(&[0x00, 0x00, 0x80, 0x52]), // MOV W0, #0 (default)
         }
     }
 
-    fn generate_load_muscle_body() -> Vec<u8> {
-        vec![
-            // load_muscle implementation
-            0xE0, 0x07, 0x40, 0xF9, // LDR X0, [SP, #0] ; muscle_id
-            0x01, 0x00, 0x00, 0x14, // BL muscle_loader
-            0xE0, 0x0B, 0x00, 0xF9, // STR X0, [SP, #16] ; result
-        ]
+    fn generate_load_muscle_body(builder: &mut CodeBuilder) {
+        // load_muscle implementation
+        builder.extend(&[0xE0, 0x07, 0x40, 0xF9]); // LDR X0, [SP, #0] ; muscle_id
+        builder.branch_link("muscle_loader");
+        builder.extend(&[0xE0, 0x0B, 0x00, 0xF9]); // STR X0, [SP, #16] ; result
     }
 
-    fn generate_schedule_body() -> Vec<u8> {
-        vec![
-            // schedule implementation
-            0xE0, 0x07, 0x40, 0xF9, // LDR X0, [SP, #0] ; muscle
-            0xE1, 0x0B, 0x40, 0xB9, // LDR W1, [SP, #8] ; priority
-            0x02, 0x00, 0x00, 0x14, // BL scheduler
-        ]
+    fn generate_schedule_body(builder: &mut CodeBuilder) {
+        // schedule implementation
+        builder.extend(&[0xE0, 0x07, 0x40, 0xF9]); // LDR X0, [SP, #0] ; muscle
+        builder.extend(&[0xE1, 0x0B, 0x40, 0xB9]); // LDR W1, [SP, #8] ; priority
+        builder.branch_link("scheduler");
     }
 
-    fn generate_emit_update_body() -> Vec<u8> {
-        vec![
-            // emit_update implementation
-            0xE0, 0x07, 0x40, 0xF9, // LDR X0, [SP, #0] ; blob
-            0x03, 0x00, 0x00, 0x14, // BL lattice_emitter
-        ]
+    fn generate_emit_update_body(builder: &mut CodeBuilder) {
+        // emit_update implementation
+        builder.extend(&[0xE0, 0x07, 0x40, 0xF9]); // LDR X0, [SP, #0] ; blob
+        builder.branch_link("lattice_emitter");
     }
 
-    fn generate_builtin_functions() -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_builtin_functions(builder: &mut CodeBuilder) {
         // hardware_attestation.verify()
-        code.extend(&[
-            // verify_attestation:
-            0x20, 0x00, 0x80, 0x52, // MOV W0, #1 (true)
-            0xC0, 0x03, 0x5F, 0xD6, // RET
-        ]);
+        builder.label("verify_attestation");
+        builder.extend(&[0x20, 0x00, 0x80, 0x52]); // MOV W0, #1 (true)
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
 
         // symbiote.process_update()
-        code.extend(&[
-            // symbiote_process_update:
-            0x00, 0x00, 0x80, 0x52, // MOV W0, #0 (no action)
-            0xC0, 0x03, 0x5F, 0xD6, // RET
-        ]);
+        builder.label("symbiote_process_update");
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0 (no action)
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
 
         // referee.self_check_failed()
-        code.extend(&[
-            // self_check_failed:
-            0x00, 0x00, 0x80, 0x52, // MOV W0, #0 (not failed)
-            0xC0, 0x03, 0x5F, 0xD6, // RET
-        ]);
+        builder.label("self_check_failed");
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0 (not failed)
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
 
-        code
+        // Stub functions for capabilities
+        builder.label("muscle_loader");
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
+
+        builder.label("scheduler");
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
+
+        builder.label("lattice_emitter");
+        builder.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
     }
 
-    fn generate_event_handlers(rules: &[Rule], program: &Program) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_event_handlers(builder: &mut CodeBuilder, rules: &[Rule], program: &Program) {
         for (i, rule) in rules.iter().enumerate() {
-            code.extend(Self::generate_rule_handler(rule, i, program));
+            Self::generate_rule_handler(builder, rule, i, program);
         }
-
-        code
     }
 
-    fn generate_rule_handler(rule: &Rule, index: usize, program: &Program) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_rule_handler(builder: &mut CodeBuilder, rule: &Rule, index: usize, program: &Program) {
         // handler_{index}:
-        code.extend(&[0xFF, 0x43, 0x00, 0xD1]); // SUB SP, SP, #16
+        let handler_label = format!("handler_{}", index);
+        builder.label(&handler_label);
+
+        builder.extend(&[0xFF, 0x43, 0x00, 0xD1]); // SUB SP, SP, #16
 
         // Generate body statements
         for statement in &rule.body {
-            code.extend(Self::generate_statement(statement, program));
+            Self::generate_statement(builder, statement, program, index);
         }
 
-        code.extend(&[0x20, 0x00, 0x80, 0x52]); // MOV W0, #1 (success)
-        code.extend(&[0xFF, 0x43, 0x00, 0x91]); // ADD SP, SP, #16
-        code.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
-
-        code
+        builder.extend(&[0x20, 0x00, 0x80, 0x52]); // MOV W0, #1 (success)
+        builder.extend(&[0xFF, 0x43, 0x00, 0x91]); // ADD SP, SP, #16
+        builder.extend(&[0xC0, 0x03, 0x5F, 0xD6]); // RET
     }
 
-    fn generate_statement(statement: &Statement, program: &Program) -> Vec<u8> {
+    fn generate_statement(builder: &mut CodeBuilder, statement: &Statement, program: &Program, handler_idx: usize) {
         match statement {
-            Statement::Verify(stmt) => Self::generate_verify_statement(stmt),
-            Statement::Let(stmt) => Self::generate_let_statement(stmt),
-            Statement::If(stmt) => Self::generate_if_statement(stmt, program),
-            Statement::Emit(stmt) => Self::generate_emit_statement(stmt),
-            Statement::Schedule(stmt) => Self::generate_schedule_statement(stmt),
-            Statement::Unschedule(stmt) => Self::generate_unschedule_statement(stmt),
-            Statement::Expr(expr) => Self::generate_expression(expr),
+            Statement::Verify(stmt) => Self::generate_verify_statement(builder, stmt, handler_idx),
+            Statement::Let(stmt) => Self::generate_let_statement(builder, stmt),
+            Statement::If(stmt) => Self::generate_if_statement(builder, stmt, program, handler_idx),
+            Statement::Emit(stmt) => Self::generate_emit_statement(builder, stmt),
+            Statement::Schedule(stmt) => Self::generate_schedule_statement(builder, stmt),
+            Statement::Unschedule(stmt) => Self::generate_unschedule_statement(builder, stmt),
+            Statement::Expr(expr) => Self::generate_expression(builder, expr),
         }
     }
 
-    fn generate_verify_statement(stmt: &VerifyStmt) -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_verify_statement(builder: &mut CodeBuilder, stmt: &VerifyStmt, handler_idx: usize) {
+        static VERIFY_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let verify_id = VERIFY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ok_label = format!("verify_ok_{}_{}", handler_idx, verify_id);
 
         // Generate condition expression
-        code.extend(Self::generate_expression(&stmt.condition));
+        Self::generate_expression(builder, &stmt.condition);
 
         // CBNZ X0, verification_ok
-        code.extend(&[0x60, 0x00, 0x00, 0xB5]); // CBNZ X0, +12
+        builder.cbnz(&ok_label, 0);
 
         // Verification failed: security violation
-        code.extend(&[0x00, 0x00, 0x00, 0x14]); // B security_violation
+        builder.branch("security_violation");
 
         // verification_ok: continue
-        code
+        builder.label(&ok_label);
     }
 
-    fn generate_let_statement(stmt: &LetStmt) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_let_statement(builder: &mut CodeBuilder, stmt: &LetStmt) {
         if let Some(expr) = &stmt.value {
-            code.extend(Self::generate_expression(expr));
+            Self::generate_expression(builder, expr);
             // Store result to local variable slot
             // In real implementation, track variable locations
         }
-
-        code
     }
 
-    fn generate_if_statement(stmt: &IfStmt, program: &Program) -> Vec<u8> {
-        let mut code = Vec::new();
+    fn generate_if_statement(builder: &mut CodeBuilder, stmt: &IfStmt, program: &Program, handler_idx: usize) {
+        static IF_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let if_id = IF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let else_label = format!("else_{}_{}", handler_idx, if_id);
+        let end_label = format!("endif_{}_{}", handler_idx, if_id);
 
         // Generate condition
-        code.extend(Self::generate_expression(&stmt.condition));
+        Self::generate_expression(builder, &stmt.condition);
 
         // CBZ X0, else_branch
-        let else_branch_offset = code.len();
-        code.extend(&[0x60, 0x00, 0x00, 0xB4]); // CBZ X0, +0 (placeholder)
+        builder.cbz(&else_label, 0);
 
         // Then branch
         for then_stmt in &stmt.then_branch {
-            code.extend(Self::generate_statement(then_stmt, program));
+            Self::generate_statement(builder, then_stmt, program, handler_idx);
         }
 
         // B end_if
-        let end_if_offset = code.len();
-        code.extend(&[0x00, 0x00, 0x00, 0x14]); // B +0 (placeholder)
+        builder.branch(&end_label);
 
-        // Else branch (if exists)
+        // Else branch
+        builder.label(&else_label);
         if let Some(else_branch) = &stmt.else_branch {
-            // Patch else branch jump
-            // In real implementation, calculate and patch offsets
-
             for else_stmt in else_branch {
-                code.extend(Self::generate_statement(else_stmt, program));
+                Self::generate_statement(builder, else_stmt, program, handler_idx);
             }
         }
 
         // end_if: continue
-        code
+        builder.label(&end_label);
     }
 
-    fn generate_emit_statement(stmt: &EmitStmt) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_emit_statement(builder: &mut CodeBuilder, stmt: &EmitStmt) {
         // Prepare arguments
         for (i, arg) in stmt.arguments.iter().enumerate() {
             if i < 8 {
-                code.extend(Self::generate_expression(arg));
+                Self::generate_expression(builder, arg);
                 // Move to argument register
                 if i > 0 {
                     // MOV X{i}, X0
-                    let mov_instr = match i {
-                        1 => vec![0xE1, 0x03, 0x00, 0xAA], // MOV X1, X0
-                        2 => vec![0xE2, 0x03, 0x00, 0xAA], // MOV X2, X0
-                        // ... etc
-                        _ => vec![],
+                    let mov_instr: [u8; 4] = match i {
+                        1 => [0xE1, 0x03, 0x00, 0xAA], // MOV X1, X0
+                        2 => [0xE2, 0x03, 0x00, 0xAA], // MOV X2, X0
+                        3 => [0xE3, 0x03, 0x00, 0xAA], // MOV X3, X0
+                        4 => [0xE4, 0x03, 0x00, 0xAA], // MOV X4, X0
+                        5 => [0xE5, 0x03, 0x00, 0xAA], // MOV X5, X0
+                        6 => [0xE6, 0x03, 0x00, 0xAA], // MOV X6, X0
+                        7 => [0xE7, 0x03, 0x00, 0xAA], // MOV X7, X0
+                        _ => continue,
                     };
-                    code.extend(mov_instr);
+                    builder.extend(&mov_instr);
                 }
             }
         }
 
         // Call emit_update capability
-        code.extend(&[0x00, 0x00, 0x00, 0x94]); // BL emit_update
-
-        code
+        builder.branch_link("emit_update");
     }
 
-    fn generate_schedule_statement(stmt: &ScheduleStmt) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_schedule_statement(builder: &mut CodeBuilder, stmt: &ScheduleStmt) {
         // Generate muscle expression
-        code.extend(Self::generate_expression(&stmt.muscle));
-        // MOV X0, X0 (muscle already in X0)
+        Self::generate_expression(builder, &stmt.muscle);
 
         // Generate priority (literal)
         if let Literal::Integer(priority) = &stmt.priority {
-            // MOV W1, #priority
-            let priority_byte = (*priority as u8).min(255);
-            code.extend(&[0xE1, 0x03, 0x00, 0x32]); // MOV W1, #priority_byte
+            // MOVZ W1, #priority (immediate)
+            let priority_val = (*priority as u32).min(0xFFFF);
+            let mov_instr = 0x52800001u32 | (priority_val << 5);
+            builder.extend(&mov_instr.to_le_bytes());
         }
 
         // Call schedule capability
-        code.extend(&[0x00, 0x00, 0x00, 0x94]); // BL schedule
-
-        code
+        builder.branch_link("schedule");
     }
 
-    fn generate_unschedule_statement(stmt: &UnscheduleStmt) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_unschedule_statement(builder: &mut CodeBuilder, stmt: &UnscheduleStmt) {
         // Generate muscle_id expression
-        code.extend(Self::generate_expression(&stmt.muscle_id));
+        Self::generate_expression(builder, &stmt.muscle_id);
 
-        // Call unschedule (uses schedule capability)
-        code.extend(&[0x00, 0x00, 0x00, 0x94]); // BL schedule (with special flag)
+        // Set flag for unschedule
+        builder.extend(&[0x21, 0x00, 0x80, 0x52]); // MOV W1, #1 (unschedule flag)
 
-        code
+        // Call schedule capability with unschedule flag
+        builder.branch_link("schedule");
     }
 
-    fn generate_expression(expr: &Expression) -> Vec<u8> {
+    fn generate_expression(builder: &mut CodeBuilder, expr: &Expression) {
         match expr {
-            Expression::Literal(literal) => Self::generate_literal(literal),
-            Expression::Variable(var) => Self::generate_variable(var),
-            Expression::SelfRef(self_ref) => Self::generate_self_reference(self_ref),
-            Expression::Call(call) => Self::generate_call_expression(call),
-            Expression::FieldAccess(access) => Self::generate_field_access(access),
-            Expression::Binary(bin) => Self::generate_binary_expression(bin),
+            Expression::Literal(literal) => Self::generate_literal(builder, literal),
+            Expression::Variable(var) => Self::generate_variable(builder, var),
+            Expression::SelfRef(self_ref) => Self::generate_self_reference(builder, self_ref),
+            Expression::Call(call) => Self::generate_call_expression(builder, call),
+            Expression::FieldAccess(access) => Self::generate_field_access(builder, access),
+            Expression::Binary(bin) => Self::generate_binary_expression(builder, bin),
         }
     }
 
-    fn generate_literal(literal: &Literal) -> Vec<u8> {
+    fn generate_literal(builder: &mut CodeBuilder, literal: &Literal) {
         match literal {
-            Literal::Hex(hex_str) => {
+            Literal::Hex(_) => {
                 if let Some(value) = literal.as_u64() {
                     if value <= 0xFFFF {
-                        // MOV X0, #value
-                        vec![0xE0, 0x03, 0x00, 0x32] // MOV W0, #(value as u16)
+                        // MOVZ X0, #value
+                        let mov_instr = 0xD2800000u32 | ((value as u32 & 0xFFFF) << 5);
+                        builder.extend(&mov_instr.to_le_bytes());
                     } else {
-                        // ADRP X0, literal_address
-                        // LDR X0, [X0, #offset]
-                        vec![0xE0, 0x03, 0x00, 0x90, 0x00, 0x00, 0x40, 0xF9] // Simplified
+                        // For larger values, use MOVZ + MOVK sequence
+                        let low = (value & 0xFFFF) as u32;
+                        let high = ((value >> 16) & 0xFFFF) as u32;
+                        let movz = 0xD2800000u32 | (low << 5);
+                        builder.extend(&movz.to_le_bytes());
+                        if high > 0 {
+                            let movk = 0xF2A00000u32 | (high << 5);
+                            builder.extend(&movk.to_le_bytes());
+                        }
                     }
                 } else {
-                    vec![0x00, 0x00, 0x80, 0x52] // MOV W0, #0
+                    builder.extend(&[0x00, 0x00, 0x80, 0xD2]); // MOVZ X0, #0
                 }
             }
             Literal::Integer(n) => {
                 if *n <= 0xFFFF {
-                    vec![0xE0, 0x03, 0x00, 0x32] // MOV W0, #(*n as u16)
+                    // MOVZ X0, #n
+                    let mov_instr = 0xD2800000u32 | ((*n as u32) << 5);
+                    builder.extend(&mov_instr.to_le_bytes());
                 } else {
-                    // Load from data section
-                    vec![0xE0, 0x03, 0x00, 0x90, 0x00, 0x00, 0x40, 0xF9]
+                    // For larger values, use MOVZ + MOVK
+                    let low = (*n as u32) & 0xFFFF;
+                    let high = ((*n as u32) >> 16) & 0xFFFF;
+                    let movz = 0xD2800000u32 | (low << 5);
+                    builder.extend(&movz.to_le_bytes());
+                    if high > 0 {
+                        let movk = 0xF2A00000u32 | (high << 5);
+                        builder.extend(&movk.to_le_bytes());
+                    }
                 }
             }
-            Literal::String(s) => {
-                // String literals go in data section
-                // ADRP X0, string_address
-                vec![0xE0, 0x03, 0x00, 0x90]
+            Literal::String(_) => {
+                // String literals: for now, load 0
+                builder.extend(&[0x00, 0x00, 0x80, 0xD2]); // MOVZ X0, #0
             }
         }
     }
 
-    fn generate_variable(_var: &str) -> Vec<u8> {
+    fn generate_variable(builder: &mut CodeBuilder, _var: &str) {
         // Load from local variable slot
         // In real implementation, track variable locations
-        vec![0xE0, 0x07, 0x40, 0xF9] // LDR X0, [SP, #0] (example)
+        builder.extend(&[0xE0, 0x07, 0x40, 0xF9]); // LDR X0, [SP, #0] (example)
     }
 
-    fn generate_self_reference(self_ref: &SelfReference) -> Vec<u8> {
+    fn generate_self_reference(builder: &mut CodeBuilder, self_ref: &SelfReference) {
         match self_ref {
             SelfReference::Id => {
-                // Load self.id from fixed location
-                vec![0xE0, 0x03, 0x00, 0x90, 0x00, 0x10, 0x40, 0xF9] // ADRP + LDR
+                // Load self.id from fixed location (data section)
+                builder.extend(&[0xE0, 0x03, 0x00, 0x90]); // ADRP X0, data
+                builder.extend(&[0x00, 0x10, 0x40, 0xF9]); // LDR X0, [X0, #32]
             }
             SelfReference::Version => {
                 // Load self.version from fixed location
-                vec![0xE0, 0x03, 0x00, 0x90, 0x00, 0x18, 0x40, 0xF9] // ADRP + LDR
+                builder.extend(&[0xE0, 0x03, 0x00, 0x90]); // ADRP X0, data
+                builder.extend(&[0x00, 0x18, 0x40, 0xF9]); // LDR X0, [X0, #48]
             }
         }
     }
 
-    fn generate_call_expression(call: &CallExpr) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_call_expression(builder: &mut CodeBuilder, call: &CallExpr) {
         // Prepare arguments
         for (i, arg) in call.arguments.iter().enumerate() {
             if i < 8 {
-                code.extend(Self::generate_expression(arg));
+                Self::generate_expression(builder, arg);
                 if i > 0 {
                     // MOV X{i}, X0
-                    let mov_instr = match i {
-                        1 => vec![0xE1, 0x03, 0x00, 0xAA],
-                        2 => vec![0xE2, 0x03, 0x00, 0xAA],
-                        // ... etc
-                        _ => vec![],
+                    let mov_instr: [u8; 4] = match i {
+                        1 => [0xE1, 0x03, 0x00, 0xAA],
+                        2 => [0xE2, 0x03, 0x00, 0xAA],
+                        3 => [0xE3, 0x03, 0x00, 0xAA],
+                        4 => [0xE4, 0x03, 0x00, 0xAA],
+                        5 => [0xE5, 0x03, 0x00, 0xAA],
+                        6 => [0xE6, 0x03, 0x00, 0xAA],
+                        7 => [0xE7, 0x03, 0x00, 0xAA],
+                        _ => continue,
                     };
-                    code.extend(mov_instr);
+                    builder.extend(&mov_instr);
                 }
             }
         }
 
-        // BL function_name
-        code.extend(&[0x00, 0x00, 0x00, 0x94]); // BL +0 (placeholder)
-
-        code
+        // BL function_name - map known functions to labels
+        let target = match call.function.as_str() {
+            "hardware_attestation.verify" => "verify_attestation",
+            "symbiote.process_update" => "symbiote_process_update",
+            "referee.self_check_failed" => "self_check_failed",
+            _ => &call.function,
+        };
+        builder.branch_link(target);
     }
 
-    fn generate_field_access(access: &FieldAccess) -> Vec<u8> {
-        // For now, treat as function call
+    fn generate_field_access(builder: &mut CodeBuilder, access: &FieldAccess) {
+        // Map common field accesses to function calls
+        let func_name = format!("{}.{}", access.object, access.field);
         let call_expr = CallExpr {
-            function: format!("{}.{}", access.object, access.field),
+            function: func_name,
             arguments: Vec::new(),
         };
-        Self::generate_call_expression(&call_expr)
+        Self::generate_call_expression(builder, &call_expr);
     }
 
-    fn generate_binary_expression(bin: &BinaryExpr) -> Vec<u8> {
-        let mut code = Vec::new();
-
+    fn generate_binary_expression(builder: &mut CodeBuilder, bin: &BinaryExpr) {
         // Generate left operand
-        code.extend(Self::generate_expression(&bin.left));
-        code.extend(&[0xE8, 0x03, 0x00, 0xAA]); // MOV X8, X0 (save left)
+        Self::generate_expression(builder, &bin.left);
+        builder.extend(&[0xE8, 0x03, 0x00, 0xAA]); // MOV X8, X0 (save left)
 
         // Generate right operand
-        code.extend(Self::generate_expression(&bin.right));
-        code.extend(&[0xE9, 0x03, 0x00, 0xAA]); // MOV X9, X0 (save right)
+        Self::generate_expression(builder, &bin.right);
+        builder.extend(&[0xE9, 0x03, 0x00, 0xAA]); // MOV X9, X0 (save right)
 
         // Generate operation
         match bin.op {
             BinaryOperator::Eq => {
-                // CMP X8, X9
+                // SUBS XZR, X8, X9 (CMP X8, X9)
+                builder.extend(&[0x1F, 0x01, 0x09, 0xEB]);
                 // CSET X0, EQ
-                code.extend(&[0x08, 0x01, 0x09, 0xEB]); // CMP X8, X9
-                code.extend(&[0xE0, 0x03, 0x9F, 0x1A]); // CSET W0, EQ
+                builder.extend(&[0xE0, 0x17, 0x9F, 0x9A]);
             }
             BinaryOperator::Ne => {
-                code.extend(&[0x08, 0x01, 0x09, 0xEB]); // CMP X8, X9
-                code.extend(&[0xE0, 0x03, 0x9F, 0x1A]); // CSET W0, NE
+                builder.extend(&[0x1F, 0x01, 0x09, 0xEB]); // CMP X8, X9
+                builder.extend(&[0x00, 0x10, 0x9F, 0x9A]); // CSET X0, NE
             }
             BinaryOperator::Add => {
-                code.extend(&[0x00, 0x01, 0x09, 0x8B]); // ADD X0, X8, X9
+                builder.extend(&[0x00, 0x01, 0x09, 0x8B]); // ADD X0, X8, X9
             }
-            // ... other operators
+            BinaryOperator::Sub => {
+                builder.extend(&[0x00, 0x01, 0x09, 0xCB]); // SUB X0, X8, X9
+            }
+            BinaryOperator::Lt => {
+                builder.extend(&[0x1F, 0x01, 0x09, 0xEB]); // CMP X8, X9
+                builder.extend(&[0xA0, 0x17, 0x9F, 0x9A]); // CSET X0, LT
+            }
+            BinaryOperator::Gt => {
+                builder.extend(&[0x1F, 0x01, 0x09, 0xEB]); // CMP X8, X9
+                builder.extend(&[0xC0, 0x17, 0x9F, 0x9A]); // CSET X0, GT
+            }
             _ => {
-                code.extend(&[0x00, 0x00, 0x80, 0x52]); // MOV W0, #0 (default)
+                builder.extend(&[0x00, 0x00, 0x80, 0xD2]); // MOVZ X0, #0 (default)
             }
         }
-
-        code
     }
 
-    fn generate_data_section(program: &Program) -> Vec<u8> {
-        let mut data = Vec::new();
+    fn generate_data_section(builder: &mut CodeBuilder, program: &Program) {
+        builder.label("data_section");
 
         // Align to 8 bytes
-        while data.len() % 8 != 0 {
-            data.push(0x00);
+        while builder.pos() % 8 != 0 {
+            builder.extend(&[0x00]);
         }
 
         // Constants
         for decl in &program.declarations {
             if let Declaration::Const(const_decl) = decl {
-                data.extend(&const_decl.value.to_bytes());
+                builder.extend(&const_decl.value.to_bytes());
                 // Pad to 8 bytes
-                while data.len() % 8 != 0 {
-                    data.push(0x00);
+                while builder.pos() % 8 != 0 {
+                    builder.extend(&[0x00]);
                 }
             }
         }
 
         // Built-in data
-        data.extend(&[0xEAu8; 32]); // genesis_root
-        data.extend(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes()); // symbiote_id
-        data.extend(&1u64.to_le_bytes()); // self.version
-
-        data
+        builder.extend(&[0xEAu8; 32]); // genesis_root
+        builder.extend(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes()); // symbiote_id
+        builder.extend(&1u64.to_le_bytes()); // self.version
     }
 
-    fn generate_capability_tables(program: &Program) -> Vec<u8> {
-        let mut tables = Vec::new();
+    fn generate_capability_tables(builder: &mut CodeBuilder, program: &Program) {
+        builder.label("capability_tables");
 
         // Capability authorization bitmap
         let mut capability_bits = 0u64;
@@ -571,9 +741,7 @@ impl NucleusCodegen {
             }
         }
 
-        tables.extend(&capability_bits.to_le_bytes());
-
-        tables
+        builder.extend(&capability_bits.to_le_bytes());
     }
 
     fn event_to_id(event: &Event) -> u8 {
